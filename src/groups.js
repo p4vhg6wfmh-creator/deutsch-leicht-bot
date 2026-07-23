@@ -1,5 +1,4 @@
 
-Groups · JS
 import { InlineKeyboard } from 'grammy';
 import * as db from './db.js';
 import { ENV, PAY_METHODS } from './config.js';
