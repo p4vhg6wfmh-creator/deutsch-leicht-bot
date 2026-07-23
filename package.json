@@ -1,0 +1,15 @@
+{
+  "name": "deutsch-bewusst-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram-бот Deutsch bewusst — этап 1: каркас, каталог, модуль оплаты, минибук",
+  "scripts": {
+    "set-webhook": "node scripts/set-webhook.mjs",
+    "drop-webhook": "node scripts/set-webhook.mjs --delete"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "grammy": "^1.30.0"
+  }
+}
