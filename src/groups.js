@@ -292,14 +292,18 @@ export function registerGroups(bot) {
     }
 
     const kb = new InlineKeyboard()
-      .text('Будни 15:00–17:00', `grptime:${groupId}:15-17`).row()
-      .text('Будни 17:00–19:00', `grptime:${groupId}:17-19`).row()
-      .text('Будни 19:00–21:00', `grptime:${groupId}:19-21`).row()
-      .text('Мне подойдёт любое',  `grptime:${groupId}:any`);
+      .text('🌅 Утро · 9:00–12:00',      `grptime:${groupId}:утро`).row()
+      .text('☀️ День · 12:00–15:00',     `grptime:${groupId}:день`).row()
+      .text('🌤 После обеда · 15:00–18:00', `grptime:${groupId}:после обеда`).row()
+      .text('🌙 Вечер · 18:00–21:00',    `grptime:${groupId}:вечер`).row()
+      .text('Мне подойдёт любое',        `grptime:${groupId}:любое`);
 
     await ctx.reply(
-      'Отлично! Один вопрос, чтобы собрать расписание под группу:\n\n' +
-      '<b>Какое время тебе удобнее?</b>',
+      'Отлично! Один вопрос, чтобы собрать расписание под группу.\n\n' +
+      `Занятие длится <b>${group.lesson_length} минут</b>, два раза в неделю. ` +
+      'Выбери промежуток, в который тебе удобно заниматься — ' +
+      'расписание соберу по ответам всей группы.\n\n' +
+      '<b>Когда тебе удобнее?</b>',
       { parse_mode: 'HTML', reply_markup: kb },
     );
   });
