@@ -9,7 +9,7 @@
     "drop-webhook": "node scripts/set-webhook.mjs --delete"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.4",
-    "grammy": "^1.30.0"
+    "@supabase/supabase-js": "^2.110.8",
+    "grammy": "^1.45.1"
   }
 }

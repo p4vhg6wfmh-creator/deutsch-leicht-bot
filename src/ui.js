@@ -41,7 +41,15 @@ export const T = {
     browsing: 'Конечно, смотри спокойно. Вот всё, что есть:',
   },
 
-  mainMenu: 'Главное меню — выбирай раздел:',
+  mainMenu:
+    '<b>Deutsch bewusst</b>\n\n' +
+    'Немецкий без зубрёжки — с пониманием, как язык устроен ' +
+    'и как учиться, не бросая на второй неделе.\n\n' +
+    '📚 <b>Занятия с преподавателем</b> — группы и набор на новые уровни\n' +
+    '🎧 <b>Материалы</b> — то, с чем можно заниматься самостоятельно\n' +
+    '👤 <b>Мой кабинет</b> — покупки, группа, оплаты\n' +
+    '💬 <b>Написать мне</b> — отвечу лично\n\n' +
+    'Выбирай, что интересно:',
 
   emptySection: 'Здесь пока пусто — скоро появится. Загляни в другие разделы.',
 
@@ -76,20 +84,48 @@ export function kbEntry() {
     .text('👀 Просто посмотреть, что есть', 'entry:browsing');
 }
 
-export function kbMain({ hasLessons, hasMaterials, hasClub }) {
+export function kbMain({ hasClub } = {}) {
   const kb = new InlineKeyboard();
-  if (hasLessons)   kb.text('📚 Занятия с преподавателем', 'menu:lessons').row();
-  if (hasMaterials) kb.text('🎧 Материалы и курсы', 'menu:materials').row();
-  if (hasClub)      kb.text('🔑 Клуб Deutsch bewusst', 'menu:club').row();
+  kb.text('📚 Занятия с преподавателем', 'menu:lessons').row();
+  kb.text('🎧 Материалы и курсы', 'menu:materials').row();
+  if (hasClub) kb.text('🔑 Клуб Deutsch bewusst', 'menu:club').row();
   kb.text('👤 Мой кабинет', 'menu:cabinet').row();
   kb.text('💬 Написать мне', 'menu:contact');
   return kb;
 }
 
-export function kbProduct(product) {
+// Постоянная кнопка внизу экрана — вернуться в меню откуда угодно
+export function kbPersistent() {
+  return {
+    keyboard: [[{ text: '☰ Меню' }]],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
+// Единый экран: правим текущее сообщение, а если не выходит —
+// удаляем его и шлём новое. Так в чате не копятся старые карточки.
+export async function screen(ctx, text, keyboard) {
+  const opts = {
+    reply_markup: keyboard,
+    parse_mode: 'HTML',
+    link_preview_options: { is_disabled: true },
+  };
+  if (ctx.callbackQuery?.message) {
+    try {
+      await ctx.editMessageText(text, opts);
+      return;
+    } catch {
+      await ctx.deleteMessage().catch(() => {});
+    }
+  }
+  await ctx.reply(text, opts);
+}
+
+export function kbProduct(product, backTo = 'menu:main') {
   return new InlineKeyboard()
     .text(`Купить · ${money(product.price_eur)}`, `buy:${product.id}`).row()
-    .text('← Назад', `menu:${product.section}`);
+    .text('← В главное меню', backTo);
 }
 
 export function kbPayMethods(orderId) {

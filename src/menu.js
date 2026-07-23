@@ -1,7 +1,9 @@
 import * as db from './db.js';
 import {
-  T, kbEntry, kbMain, kbProduct, kbBackMain, money, escapeHtml,
+  T, kbEntry, kbMain, kbProduct, kbBackMain, kbPersistent, screen,
+  money, escapeHtml,
 } from './ui.js';
+import { memberships } from './groups.js';
 
 const SECTION_TITLES = {
   lessons:   '📚 <b>Занятия с преподавателем</b>',
@@ -18,41 +20,27 @@ const ENTRY_SECTION = {
 };
 
 async function mainMenuKeyboard() {
-  const [lessons, materials, club] = await Promise.all([
-    db.countActive('lessons'),
-    db.countActive('materials'),
-    db.countActive('club'),
-  ]);
-  return kbMain({
-    hasLessons:   lessons > 0,
-    hasMaterials: materials > 0,
-    hasClub:      club > 0,
-  });
+  const club = await db.countActive('club');
+  return kbMain({ hasClub: club > 0 });
 }
 
-export async function showMain(ctx, edit = false) {
+export async function showMain(ctx) {
   const kb = await mainMenuKeyboard();
-  const opts = { reply_markup: kb, parse_mode: 'HTML' };
-  if (edit && ctx.callbackQuery) {
-    await ctx.editMessageText(T.mainMenu, opts).catch(() => ctx.reply(T.mainMenu, opts));
-  } else {
-    await ctx.reply(T.mainMenu, opts);
-  }
+  await screen(ctx, T.mainMenu, kb);
 }
 
 export async function showSection(ctx, section, prefix = '') {
   const products = await db.listProducts(section);
 
   if (!products.length) {
-    await ctx.editMessageText(T.emptySection, {
-      reply_markup: kbBackMain(), parse_mode: 'HTML',
-    }).catch(() => ctx.reply(T.emptySection, { reply_markup: kbBackMain() }));
+    await screen(ctx, T.emptySection, kbBackMain());
     return;
   }
 
-  // Один продукт в разделе — показываем карточку сразу
+  // Один продукт в разделе — показываем карточку сразу,
+  // и «назад» ведёт в главное меню, а не обратно в этот же раздел
   if (products.length === 1) {
-    await showProduct(ctx, products[0], prefix);
+    await showProduct(ctx, products[0], prefix, 'menu:main');
     return;
   }
 
@@ -64,19 +52,17 @@ export async function showSection(ctx, section, prefix = '') {
   kb.text('← В главное меню', 'menu:main');
 
   const text = `${prefix}${prefix ? '\n\n' : ''}${SECTION_TITLES[section]}`;
-  await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'HTML' })
-    .catch(() => ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }));
+  await screen(ctx, text, kb);
 }
 
-export async function showProduct(ctx, product, prefix = '') {
+export async function showProduct(ctx, product, prefix = '', backTo = 'menu:main') {
   const text =
     `${prefix}${prefix ? '\n\n' : ''}` +
     `<b>${escapeHtml(product.title)}</b>\n\n` +
     `${product.description ?? ''}\n\n` +
     `Стоимость: <b>${money(product.price_eur)}</b>`;
 
-  const opts = { reply_markup: kbProduct(product), parse_mode: 'HTML' };
-  await ctx.editMessageText(text, opts).catch(() => ctx.reply(text, opts));
+  await screen(ctx, text, kbProduct(product, backTo));
 }
 
 // ---------------------------------------------------------------------
@@ -86,6 +72,8 @@ export function registerMenu(bot) {
     const user = await db.ensureUser(ctx.from, payload);
     await db.clearState(user.id);
 
+    await ctx.reply('Открываю меню 👇', { reply_markup: kbPersistent() });
+
     // Уже отвечал на входной вопрос — сразу в меню
     if (user.entry_answer) return showMain(ctx);
 
@@ -94,7 +82,10 @@ export function registerMenu(bot) {
 
   bot.command('menu', (ctx) => showMain(ctx));
   bot.command('materials', async (ctx) => showSection(ctx, 'materials'));
-  bot.command('lessons',   async (ctx) => showSection(ctx, 'lessons'));
+  bot.command('lessons',   async (ctx) => {
+    const { showGroupList } = await import('./groups.js');
+    return showGroupList(ctx);
+  });
 
   bot.callbackQuery(/^entry:(\w+)$/, async (ctx) => {
     const answer = ctx.match[1];
@@ -103,16 +94,28 @@ export function registerMenu(bot) {
     await ctx.answerCallbackQuery();
 
     const section = ENTRY_SECTION[answer] ?? 'main';
-    if (section === 'main') return showMain(ctx, true);
+    if (section === 'main') return showMain(ctx);
+    if (section === 'lessons') {
+      const { showGroupList } = await import('./groups.js');
+      return showGroupList(ctx);
+    }
     await showSection(ctx, section, T.entryAck[answer]);
   });
 
   bot.callbackQuery('menu:main', async (ctx) => {
     await ctx.answerCallbackQuery();
-    await showMain(ctx, true);
+    await showMain(ctx);
   });
 
-  bot.callbackQuery(/^menu:(lessons|materials|club)$/, async (ctx) => {
+  // Постоянная кнопка внизу экрана
+  bot.hears('☰ Меню', (ctx) => showMain(ctx));
+
+  // Показать первый экран заново
+  bot.command('start_over', async (ctx) => {
+    await ctx.reply(T.welcome, { reply_markup: kbEntry(), parse_mode: 'HTML' });
+  });
+
+  bot.callbackQuery(/^menu:(materials|club)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     await showSection(ctx, ctx.match[1]);
   });
@@ -133,9 +136,8 @@ export function registerMenu(bot) {
     const orders = await db.userOrders(user.id);
     const paid   = orders.filter((o) => o.status === 'paid');
 
-    if (!paid.length) {
-      return ctx.editMessageText(T.cabinetEmpty, { reply_markup: kbBackMain() })
-        .catch(() => ctx.reply(T.cabinetEmpty, { reply_markup: kbBackMain() }));
+    if (!paid.length && !(await memberships(user.id)).length) {
+      return screen(ctx, T.cabinetEmpty, kbBackMain());
     }
 
     const { InlineKeyboard } = await import('grammy');
@@ -148,9 +150,20 @@ export function registerMenu(bot) {
     const lines = paid.map(
       (o) => `• ${escapeHtml(o.title_snapshot)} — ${money(o.amount_eur)}`,
     );
-    const text = `👤 <b>Мой кабинет</b>\n\nТвои покупки:\n${lines.join('\n')}`;
-    await ctx.editMessageText(text, { reply_markup: kb, parse_mode: 'HTML' })
-      .catch(() => ctx.reply(text, { reply_markup: kb, parse_mode: 'HTML' }));
+
+    let text = `👤 <b>Мой кабинет</b>\n\nТвои покупки:\n${lines.join('\n')}`;
+
+    const groups = await memberships(user.id);
+    if (groups.length) {
+      const gl = groups.map((m) => {
+        const g = m.groups;
+        const when = g.schedule_text ? ` · ${escapeHtml(g.schedule_text)}` : '';
+        const paidTo = m.paid_until ? `оплачено до ${m.paid_until}` : 'ожидает оплаты';
+        return `• ${escapeHtml(g.title)}${when} — ${paidTo}`;
+      });
+      text += `\n\n<b>Мои группы:</b>\n${gl.join('\n')}`;
+    }
+    await screen(ctx, text, kb);
   });
 
   // Повторная выдача файла
