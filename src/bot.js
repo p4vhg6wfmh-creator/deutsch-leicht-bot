@@ -4,6 +4,8 @@ import { registerMenu } from './menu.js';
 import { registerPayment } from './payment.js';
 import { registerGroups } from './groups.js';
 import { registerPractice } from './practice.js';
+import { registerLessons } from './lessons.js';
+import { registerExtras } from './extras.js';
 import * as db from './db.js';
 
 let _bot = null;
@@ -17,6 +19,7 @@ export function getBot() {
   registerMenu(bot);
   registerGroups(bot);
   registerPractice(bot);
+  registerLessons(bot);
   registerPayment(bot);
 
   bot.command('help', (ctx) =>
@@ -25,6 +28,9 @@ export function getBot() {
 
   // Служебное: узнать свой tg_id (для OWNER_TG_ID)
   bot.command('whoami', (ctx) => ctx.reply(`Твой tg_id: ${ctx.from.id}`));
+
+  // Регистрируется последним: ловит всё, что не разобрали остальные
+  registerExtras(bot);
 
   bot.catch(async (err) => {
     console.error('BOT ERROR', err.error ?? err);

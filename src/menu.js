@@ -4,6 +4,7 @@ import {
   money, escapeHtml,
 } from './ui.js';
 import { memberships } from './groups.js';
+import { isSubscribed } from './channel.js';
 
 const SECTION_TITLES = {
   lessons:   '📚 <b>Занятия с преподавателем</b>',
@@ -73,6 +74,19 @@ export function registerMenu(bot) {
     await db.clearState(user.id);
 
     await ctx.reply('Открываю меню 👇', { reply_markup: kbPersistent() });
+
+    // Мягкое приглашение в канал — ничего не блокирует
+    const settings = await db.getSettings();
+    if (settings.channel_url) {
+      const subscribed = await isSubscribed({ api: ctx.api }, ctx.from.id);
+      if (!subscribed) {
+        const { InlineKeyboard } = await import('grammy');
+        await ctx.reply(
+          'Кстати, я веду канал — там разборы, задания и новости про группы.',
+          { reply_markup: new InlineKeyboard().url('Подписаться', settings.channel_url) },
+        ).catch(() => {});
+      }
+    }
 
     // Уже отвечал на входной вопрос — сразу в меню
     if (user.entry_answer) return showMain(ctx);

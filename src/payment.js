@@ -1,5 +1,6 @@
 import * as db from './db.js';
 import { deliverCohort } from './groups.js';
+import { deliverLesson, deliverPackage } from './lessons.js';
 import { PAY_METHODS, ENV } from './config.js';
 import {
   T, kbPayMethods, kbPaid, kbAdmin, kbBackMain,
@@ -44,8 +45,12 @@ export async function deliver(bot, order) {
     }
   } else if (order.product_type === 'cohort') {
     await deliverCohort(bot, order, user.tg_id);
+  } else if (order.product_type === 'lesson') {
+    await deliverLesson(bot, order, user.tg_id);
+  } else if (order.product_type === 'package') {
+    await deliverPackage(bot, order, user.tg_id);
   } else {
-    // lesson / subscription — этапы 3–5
+    // subscription — этап 5
     await bot.api.sendMessage(
       user.tg_id,
       'Оплата подтверждена! Свяжусь с тобой с деталями в ближайшее время 🙌',

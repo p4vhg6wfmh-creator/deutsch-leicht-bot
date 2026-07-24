@@ -86,6 +86,7 @@ export async function showGroupList(ctx) {
     if (openLevels.has(lvl)) continue;
     kb.text(`⚪️ ${lvl} — лист ожидания`, `wl:${lvl}`).row();
   }
+  kb.text('🎓 Индивидуальные уроки', 'slots:days').row();
   kb.text('← В главное меню', 'menu:main');
 
   const text =
