@@ -3,7 +3,7 @@ import * as db from './db.js';
 import { screen, kbBackMain, escapeHtml } from './ui.js';
 
 const TZ = 'Europe/Kyiv';
-export const LEVELS = ['A0', 'A1', 'A2', 'B1'];
+export const LEVELS = ['A0', 'A1', 'A2', 'B1', 'B2'];
 
 function kyivToday() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
@@ -211,13 +211,17 @@ export function registerPractice(bot) {
     }, { onConflict: 'user_id' });
 
     const kb = new InlineKeyboard();
-    LEVELS.forEach((l) => kb.text(l, `psetlevel:${l}`));
+    LEVELS.forEach((l, i) => {
+      kb.text(l, `psetlevel:${l}`);
+      if (i === 2) kb.row();
+    });
     await ctx.reply(
       'С какого уровня начнём?\n\n' +
       '<b>A0</b> — с нуля, читаю с трудом\n' +
       '<b>A1</b> — знаю базу, говорю простыми фразами\n' +
       '<b>A2</b> — понимаю речь, путаюсь в грамматике\n' +
-      '<b>B1</b> — говорю, но хочу точности',
+      '<b>B1</b> — говорю, но хочу точности\n' +
+      '<b>B2</b> — свободно, шлифую нюансы',
       { parse_mode: 'HTML', reply_markup: kb },
     );
   });
@@ -234,7 +238,10 @@ export function registerPractice(bot) {
   bot.callbackQuery('plevel', async (ctx) => {
     await ctx.answerCallbackQuery();
     const kb = new InlineKeyboard();
-    LEVELS.forEach((l) => kb.text(l, `psetlevel:${l}`));
+    LEVELS.forEach((l, i) => {
+      kb.text(l, `psetlevel:${l}`);
+      if (i === 2) kb.row();
+    });
     await ctx.reply('Выбери уровень:', { reply_markup: kb });
   });
 
