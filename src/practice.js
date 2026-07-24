@@ -3,18 +3,19 @@ import * as db from './db.js';
 import { screen, kbBackMain, escapeHtml } from './ui.js';
 
 const TZ = 'Europe/Kyiv';
-export const LEVELS = ['A0', 'A1', 'A2', 'B1', 'B2'];
 
 function kyivToday() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
 }
+
 function kyivHour() {
   return Number(new Intl.DateTimeFormat('en-GB', {
     timeZone: TZ, hour: '2-digit', hour12: false,
   }).format(new Date()));
 }
-function daysBetween(a, b) {
-  return Math.round((new Date(b) - new Date(a)) / 86400000);
+
+function daysBetween(fromStr, toStr) {
+  return Math.round((new Date(toStr) - new Date(fromStr)) / 86400000);
 }
 
 // ---------------------------------------------------------------------
@@ -26,22 +27,17 @@ async function getSub(userId) {
   return data;
 }
 
-async function answeredIds(userId) {
-  const { data } = await db.supabase
-    .from('practice_answers').select('task_id').eq('user_id', userId);
-  return (data ?? []).map((r) => r.task_id);
-}
-
-// Следующее задание: по порядку тем, внутри темы — по возрастанию сложности
 async function pickTask(userId, level) {
-  const seen = await answeredIds(userId);
+  const { data: done } = await db.supabase
+    .from('practice_answers').select('task_id').eq('user_id', userId);
+  const seen = (done ?? []).map((r) => r.task_id);
 
   let q = db.supabase
-    .from('practice_queue')
+    .from('practice_tasks')
     .select('*')
+    .eq('is_active', true)
     .eq('level', level)
-    .order('topic_order', { ascending: true })
-    .order('step', { ascending: true })
+    .order('sort_order', { ascending: true })
     .limit(1);
 
   if (seen.length) q = q.not('id', 'in', `(${seen.join(',')})`);
@@ -50,59 +46,24 @@ async function pickTask(userId, level) {
   return data?.[0] ?? null;
 }
 
-// Сколько заданий решено сегодня
-async function solvedToday(userId) {
-  const from = `${kyivToday()}T00:00:00Z`;
-  const { count } = await db.supabase
-    .from('practice_answers')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', userId)
-    .gte('answered_at', from);
-  return count ?? 0;
-}
-
-// Прогресс по уровню
-async function levelProgress(userId, level) {
-  const seen = await answeredIds(userId);
-  const { count: total } = await db.supabase
-    .from('practice_queue')
-    .select('id', { count: 'exact', head: true })
-    .eq('level', level);
-
-  let doneQ = db.supabase
-    .from('practice_queue')
-    .select('id', { count: 'exact', head: true })
-    .eq('level', level);
-  if (seen.length) doneQ = doneQ.in('id', seen);
-  const { count: done } = seen.length ? await doneQ : { count: 0 };
-
-  return { total: total ?? 0, done: done ?? 0 };
-}
-
-// ---------------------------------------------------------------------
-// Отправка задания
-// ---------------------------------------------------------------------
 function taskKeyboard(task) {
   const kb = new InlineKeyboard();
-  task.options.forEach((opt, i) => kb.text(opt, `pq:${task.id}:${i}`).row());
+  task.options.forEach((opt, i) => {
+    kb.text(opt, `pq:${task.id}:${i}`).row();
+  });
   return kb;
 }
 
-function taskText(task) {
-  return (
-    `🎯 <b>${escapeHtml(task.topic_title)}</b> · задание ${task.step} из 10\n\n` +
-    task.question
+export async function sendTask(bot, tgId, task) {
+  await bot.api.sendMessage(
+    tgId,
+    `🎯 <b>Задание дня</b>\n\n${task.question}`,
+    { parse_mode: 'HTML', reply_markup: taskKeyboard(task) },
   );
 }
 
-export async function sendTask(bot, tgId, task) {
-  await bot.api.sendMessage(tgId, taskText(task), {
-    parse_mode: 'HTML', reply_markup: taskKeyboard(task),
-  });
-}
-
 // ---------------------------------------------------------------------
-// Ежедневная рассылка
+// Ежедневная рассылка (вызывается по расписанию, раз в час)
 // ---------------------------------------------------------------------
 export async function runDailyPractice(bot) {
   const settings = await db.getSettings(true);
@@ -120,6 +81,7 @@ export async function runDailyPractice(bot) {
   let sent = 0;
 
   for (const sub of subs ?? []) {
+    // уже отправляли сегодня
     if (sub.last_sent_at && sub.last_sent_at.slice(0, 10) >= today) continue;
 
     const task = await pickTask(sub.user_id, sub.level);
@@ -127,53 +89,57 @@ export async function runDailyPractice(bot) {
     if (!task) {
       await bot.api.sendMessage(
         sub.users.tg_id,
-        `Ты прошла все задания уровня ${sub.level} 👏\n\n` +
-        'Можно переключиться на следующий уровень в разделе «Задание дня».',
+        'Ты прошла все задания этого уровня 👏 Новые добавляю регулярно — ' +
+        'загляни через пару дней.',
       ).catch(() => {});
-    } else {
-      await sendTask(bot, sub.users.tg_id, task).then(() => sent++).catch(() => {});
+      await db.supabase.from('practice_subs')
+        .update({ last_sent_at: new Date().toISOString() })
+        .eq('user_id', sub.user_id);
+      continue;
     }
 
-    await db.supabase.from('practice_subs')
-      .update({ last_sent_at: new Date().toISOString() })
-      .eq('user_id', sub.user_id);
+    await sendTask(bot, sub.users.tg_id, task)
+      .then(async () => {
+        sent++;
+        await db.supabase.from('practice_subs')
+          .update({ last_sent_at: new Date().toISOString() })
+          .eq('user_id', sub.user_id);
+      })
+      .catch(() => {});
   }
 
   return sent;
 }
 
 // ---------------------------------------------------------------------
-// Экран раздела
+// Экраны
 // ---------------------------------------------------------------------
 async function showPractice(ctx) {
   const user = await db.ensureUser(ctx.from);
   const sub  = await getSub(user.id);
-  const kb   = new InlineKeyboard();
+
+  const kb = new InlineKeyboard();
 
   if (!sub || !sub.is_active) {
-    kb.text('Начать заниматься', 'pon').row();
+    kb.text('Включить задание дня', 'pon').row();
     kb.text('← В главное меню', 'menu:main');
     return screen(
       ctx,
       '🎯 <b>Задание дня</b>\n\n' +
-      'Задания разбиты по темам: в каждой теме десять шагов, ' +
-      'и каждый следующий чуть сложнее предыдущего.\n\n' +
-      'После ответа я объясняю <b>почему</b> так — понимание правила ' +
-      'работает лучше, чем зубрёжка исключений.\n\n' +
-      'Несколько заданий в день, бесплатно, ' +
-      'отписаться можно в любой момент.',
+      'Одно короткое задание каждый день — минута времени, ' +
+      'но именно так язык остаётся в голове.\n\n' +
+      'После ответа я объясняю <b>почему</b> так, а не просто ставлю галочку. ' +
+      'Понимание правила работает лучше, чем зубрёжка исключений.\n\n' +
+      'Бесплатно, отписаться можно в любой момент.',
       kb,
     );
   }
 
-  const { total, done } = await levelProgress(user.id, sub.level);
-  const todayCount = await solvedToday(user.id);
   const accuracy = sub.answered_count
-    ? Math.round((sub.correct_count / sub.answered_count) * 100) : 0;
+    ? Math.round((sub.correct_count / sub.answered_count) * 100)
+    : 0;
 
-  kb.text('Заниматься сейчас', 'pmore').row();
-  kb.text(`📐 Уровень: ${sub.level}`, 'plevel')
-    .text(`🔢 В день: ${sub.daily_count}`, 'pcount').row();
+  kb.text('Задание сейчас', 'pmore').row();
   kb.text(`⏰ Время: ${String(sub.send_hour).padStart(2, '0')}:00`, 'ptime').row();
   kb.text('Выключить', 'poff').row();
   kb.text('← В главное меню', 'menu:main');
@@ -181,11 +147,11 @@ async function showPractice(ctx) {
   await screen(
     ctx,
     '🎯 <b>Задание дня</b>\n\n' +
-    `Уровень: <b>${sub.level}</b> · пройдено ${done} из ${total}\n` +
-    `Серия: <b>${sub.streak}</b> дн. подряд (лучшая — ${sub.best_streak})\n` +
-    `Сегодня решено: ${todayCount} из ${sub.daily_count}\n` +
-    (sub.answered_count ? `Правильных ответов: ${accuracy}%\n` : '') +
-    `\nЗадания приходят в ${String(sub.send_hour).padStart(2, '0')}:00.`,
+    `Серия: <b>${sub.streak}</b> дн. подряд\n` +
+    `Лучшая серия: ${sub.best_streak} дн.\n` +
+    `Решено заданий: ${sub.answered_count}\n` +
+    (sub.answered_count ? `Правильных: ${accuracy}%\n` : '') +
+    `\nПриходит каждый день в ${String(sub.send_hour).padStart(2, '0')}:00.`,
     kb,
   );
 }
@@ -196,34 +162,29 @@ export function registerPractice(bot) {
     await ctx.answerCallbackQuery();
     await showPractice(ctx);
   });
+
   bot.command('practice', (ctx) => showPractice(ctx));
 
-  // --- Включение -------------------------------------------------------
+  // --- Подписка -------------------------------------------------------
   bot.callbackQuery('pon', async (ctx) => {
     await ctx.answerCallbackQuery();
     const user = await db.ensureUser(ctx.from);
     const settings = await db.getSettings();
 
     await db.supabase.from('practice_subs').upsert({
-      user_id: user.id,
+      user_id:   user.id,
       is_active: true,
       send_hour: Number(settings.practice_default_hour || 10),
     }, { onConflict: 'user_id' });
 
-    const kb = new InlineKeyboard();
-    LEVELS.forEach((l, i) => {
-      kb.text(l, `psetlevel:${l}`);
-      if (i === 2) kb.row();
-    });
     await ctx.reply(
-      'С какого уровня начнём?\n\n' +
-      '<b>A0</b> — с нуля, читаю с трудом\n' +
-      '<b>A1</b> — знаю базу, говорю простыми фразами\n' +
-      '<b>A2</b> — понимаю речь, путаюсь в грамматике\n' +
-      '<b>B1</b> — говорю, но хочу точности\n' +
-      '<b>B2</b> — свободно, шлифую нюансы',
-      { parse_mode: 'HTML', reply_markup: kb },
+      'Готово! Первое задание пришлю завтра утром.\n\n' +
+      'А вот одно прямо сейчас, чтобы не ждать 👇',
     );
+
+    const sub  = await getSub(user.id);
+    const task = await pickTask(user.id, sub.level);
+    if (task) await sendTask(bot, ctx.from.id, task);
   });
 
   bot.callbackQuery('poff', async (ctx) => {
@@ -231,56 +192,13 @@ export function registerPractice(bot) {
     await db.supabase.from('practice_subs')
       .update({ is_active: false }).eq('user_id', user.id);
     await ctx.answerCallbackQuery({ text: 'Выключено' });
-    await ctx.reply('Выключила. Прогресс и серия сохранятся.', { reply_markup: kbBackMain() });
+    await ctx.reply(
+      'Выключила. Включить обратно можно в любой момент — серия сохранится.',
+      { reply_markup: kbBackMain() },
+    );
   });
 
-  // --- Уровень ---------------------------------------------------------
-  bot.callbackQuery('plevel', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const kb = new InlineKeyboard();
-    LEVELS.forEach((l, i) => {
-      kb.text(l, `psetlevel:${l}`);
-      if (i === 2) kb.row();
-    });
-    await ctx.reply('Выбери уровень:', { reply_markup: kb });
-  });
-
-  bot.callbackQuery(/^psetlevel:(\w+)$/, async (ctx) => {
-    const level = ctx.match[1];
-    const user  = await db.ensureUser(ctx.from);
-    await db.supabase.from('practice_subs')
-      .update({ level }).eq('user_id', user.id);
-    await ctx.answerCallbackQuery({ text: `Уровень ${level}` });
-
-    const task = await pickTask(user.id, level);
-    if (!task) {
-      return ctx.reply(
-        `На уровне ${level} заданий пока нет — скоро добавлю.`,
-        { reply_markup: kbBackMain() },
-      );
-    }
-    await ctx.reply('Поехали 👇');
-    await sendTask(bot, ctx.from.id, task);
-  });
-
-  // --- Сколько в день ---------------------------------------------------
-  bot.callbackQuery('pcount', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const kb = new InlineKeyboard();
-    [1, 3, 5, 10].forEach((n) => kb.text(String(n), `psetcount:${n}`));
-    await ctx.reply('Сколько заданий в день?', { reply_markup: kb });
-  });
-
-  bot.callbackQuery(/^psetcount:(\d+)$/, async (ctx) => {
-    const n = Number(ctx.match[1]);
-    const user = await db.ensureUser(ctx.from);
-    await db.supabase.from('practice_subs')
-      .update({ daily_count: n }).eq('user_id', user.id);
-    await ctx.answerCallbackQuery({ text: 'Сохранено' });
-    await ctx.reply(`Теперь ${n} заданий в день.`);
-  });
-
-  // --- Время ------------------------------------------------------------
+  // --- Выбор времени ---------------------------------------------------
   bot.callbackQuery('ptime', async (ctx) => {
     await ctx.answerCallbackQuery();
     const kb = new InlineKeyboard();
@@ -288,7 +206,7 @@ export function registerPractice(bot) {
       kb.text(`${String(h).padStart(2, '0')}:00`, `psethour:${h}`);
       if (i % 3 === 2) kb.row();
     });
-    await ctx.reply('Во сколько присылать?', { reply_markup: kb });
+    await ctx.reply('Во сколько присылать задание?', { reply_markup: kb });
   });
 
   bot.callbackQuery(/^psethour:(\d+)$/, async (ctx) => {
@@ -297,10 +215,10 @@ export function registerPractice(bot) {
     await db.supabase.from('practice_subs')
       .update({ send_hour: hour }).eq('user_id', user.id);
     await ctx.answerCallbackQuery({ text: 'Сохранено' });
-    await ctx.reply(`Буду присылать в ${String(hour).padStart(2, '0')}:00.`);
+    await ctx.reply(`Теперь задание будет приходить в ${String(hour).padStart(2, '0')}:00.`);
   });
 
-  // --- Следующее задание -------------------------------------------------
+  // --- Ещё одно задание -----------------------------------------------
   bot.callbackQuery('pmore', async (ctx) => {
     await ctx.answerCallbackQuery();
     const user = await db.ensureUser(ctx.from);
@@ -308,44 +226,46 @@ export function registerPractice(bot) {
     const task = await pickTask(user.id, sub?.level ?? 'A0');
 
     if (!task) {
-      const kb = new InlineKeyboard().text('Сменить уровень', 'plevel').row()
-        .text('← В главное меню', 'menu:main');
       return ctx.reply(
-        `Задания уровня ${sub?.level ?? 'A0'} закончились 👏 ` +
-        'Можно перейти на следующий уровень.',
-        { reply_markup: kb },
+        'Задания этого уровня закончились 👏 Новые добавляю регулярно.',
+        { reply_markup: kbBackMain() },
       );
     }
     await sendTask(bot, ctx.from.id, task);
   });
 
-  // --- Ответ -------------------------------------------------------------
+  // --- Ответ на задание -------------------------------------------------
   bot.callbackQuery(/^pq:([^:]+):(\d+)$/, async (ctx) => {
     const [, taskId, pickedStr] = ctx.match;
     const picked = Number(pickedStr);
     const user = await db.ensureUser(ctx.from);
 
     const { data: task } = await db.supabase
-      .from('practice_queue').select('*').eq('id', taskId).maybeSingle();
+      .from('practice_tasks').select('*').eq('id', taskId).maybeSingle();
     if (!task) return ctx.answerCallbackQuery();
 
     const correct = picked === task.correct_ix;
     await ctx.answerCallbackQuery({ text: correct ? 'Верно!' : 'Не совсем' });
 
+    // Записываем ответ (повторный не перезаписываем)
     const { error } = await db.supabase.from('practice_answers')
       .insert({ user_id: user.id, task_id: task.id, is_correct: correct });
+
     const firstTime = !error;
 
+    // Обновляем серию
     let sub = await getSub(user.id);
     if (sub && firstTime) {
       const today = kyivToday();
       let streak = sub.streak;
+
       if (!sub.last_answer_on) streak = 1;
       else {
         const gap = daysBetween(sub.last_answer_on, today);
         if (gap === 1) streak = sub.streak + 1;
         else if (gap > 1) streak = 1;
       }
+
       await db.supabase.from('practice_subs').update({
         streak,
         best_streak:    Math.max(streak, sub.best_streak),
@@ -353,40 +273,33 @@ export function registerPractice(bot) {
         correct_count:  sub.correct_count + (correct ? 1 : 0),
         last_answer_on: today,
       }).eq('user_id', user.id);
+
       sub = { ...sub, streak };
     }
 
+    // Показываем правильный ответ и разбор
     const right = task.options[task.correct_ix];
-    const head  = correct ? '✅ <b>Верно!</b>'
-                          : `❌ <b>Правильно: ${escapeHtml(right)}</b>`;
+    const head = correct
+      ? '✅ <b>Верно!</b>'
+      : `❌ <b>Правильно: ${escapeHtml(right)}</b>`;
 
-    const done = await solvedToday(user.id);
-    const goal = sub?.daily_count ?? 3;
-    const finished = done >= goal;
+    const streakLine = sub && firstTime && sub.streak > 1
+      ? `\n\n🔥 Серия: ${sub.streak} дн. подряд`
+      : '';
 
-    const kb = new InlineKeyboard();
-    if (finished) {
-      kb.text('Хочу ещё', 'pmore').row();
-    } else {
-      kb.text(`Следующее (${done} из ${goal})`, 'pmore').row();
-    }
-    kb.text('☰ Главное меню', 'menu:main');
-
-    let tail = '';
-    if (finished && sub?.streak > 1) {
-      tail = `\n\n🔥 Норма на сегодня выполнена. Серия: ${sub.streak} дн. подряд`;
-    } else if (finished) {
-      tail = '\n\n👏 Норма на сегодня выполнена';
-    }
+    const kb = new InlineKeyboard()
+      .text('Ещё задание', 'pmore').row()
+      .text('☰ Главное меню', 'menu:main');
 
     await ctx.editMessageText(
-      `${taskText(task)}\n\n${head}\n\n${task.explanation}${tail}`,
+      `${task.question}\n\n${head}\n\n${task.explanation}${streakLine}`,
       { parse_mode: 'HTML', reply_markup: kb },
     ).catch(() => {});
 
-    if (firstTime && sub && (sub.answered_count + 1) === 10) {
+    // Мягкое предложение минибука после пятого задания
+    if (firstTime && sub && (sub.answered_count + 1) === 5) {
       await ctx.reply(
-        'Десять заданий позади 👏\n\n' +
+        'Кстати, ты решила уже пять заданий подряд 👏\n\n' +
         'Если хочется системнее — в минибуке таких разборов больше семидесяти страниц, ' +
         'и там же таблицы, к которым удобно возвращаться.',
         { reply_markup: new InlineKeyboard().text('Посмотреть минибук', 'menu:materials') },
