@@ -3,6 +3,7 @@ import { ENV } from './config.js';
 import { registerMenu } from './menu.js';
 import { registerPayment } from './payment.js';
 import { registerGroups } from './groups.js';
+import { registerPractice } from './practice.js';
 import * as db from './db.js';
 
 let _bot = null;
@@ -15,6 +16,7 @@ export function getBot() {
   // Порядок важен: меню регистрирует команды, payment — обработчики сообщений
   registerMenu(bot);
   registerGroups(bot);
+  registerPractice(bot);
   registerPayment(bot);
 
   bot.command('help', (ctx) =>

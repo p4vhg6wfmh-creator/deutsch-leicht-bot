@@ -45,6 +45,7 @@ export const T = {
     '<b>Deutsch bewusst</b>\n\n' +
     'Немецкий без зубрёжки — с пониманием, как язык устроен ' +
     'и как учиться, не бросая на второй неделе.\n\n' +
+    '🎯 <b>Задание дня</b> — одно упражнение в день с разбором, бесплатно\n' +
     '📚 <b>Занятия с преподавателем</b> — группы и набор на новые уровни\n' +
     '🎧 <b>Материалы</b> — то, с чем можно заниматься самостоятельно\n' +
     '👤 <b>Мой кабинет</b> — покупки, группа, оплаты\n' +
@@ -86,6 +87,7 @@ export function kbEntry() {
 
 export function kbMain({ hasClub } = {}) {
   const kb = new InlineKeyboard();
+  kb.text('🎯 Задание дня', 'menu:practice').row();
   kb.text('📚 Занятия с преподавателем', 'menu:lessons').row();
   kb.text('🎧 Материалы и курсы', 'menu:materials').row();
   if (hasClub) kb.text('🔑 Клуб Deutsch bewusst', 'menu:club').row();
