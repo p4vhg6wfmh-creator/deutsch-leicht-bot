@@ -87,6 +87,7 @@ export async function showGroupList(ctx) {
     kb.text(`⚪️ ${lvl} — лист ожидания`, `wl:${lvl}`).row();
   }
   kb.text('🎓 Индивидуальные уроки', 'slots:days').row();
+  kb.text('💬 Разговорный клуб', 'club:show').row();
   kb.text('← В главное меню', 'menu:main');
 
   const text =
@@ -111,14 +112,20 @@ async function showGroupCard(ctx, group, prefix = '') {
     `${group.description ?? ''}\n\n` +
     `${when}\n` +
     `Платформа: ${escapeHtml(group.platform)}\n` +
-    `Стоимость: <b>${money(group.price_eur)}</b> в месяц\n` +
+    `Стоимость: <b>${money(group.price_eur)}</b> в месяц` +
+    (group.drop_in_eur ? ` · разовое ${money(group.drop_in_eur)}` : '') + `\n` +
     `Мест занято: ${group.seats_taken} из ${group.capacity}`;
 
   const kb = new InlineKeyboard();
   if (member && member.status !== 'left') {
     kb.text('✅ Ты уже записана(-н)', 'noop').row();
+  } else if (group.status !== 'recruiting') {
+    kb.text('Сообщить, когда откроется набор', `wl:${group.level}`).row();
   } else if (group.seats_left > 0) {
     kb.text('Забронировать место', `grpjoin:${group.id}`).row();
+    if (group.drop_in_eur) {
+      kb.text(`Разовое занятие · ${money(group.drop_in_eur)}`, `grpdrop:${group.id}`).row();
+    }
   } else {
     kb.text('Мест нет — сообщить, если освободится', `wl:${group.level}`).row();
   }
@@ -362,6 +369,82 @@ export function registerGroups(bot) {
       `Занято мест: ${group.seats_taken + 1} из ${group.capacity}`,
       { parse_mode: 'HTML' },
     ).catch(() => {});
+  });
+
+  // --- Разовое занятие в группе ---------------------------------------
+  bot.callbackQuery(/^grpdrop:(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const group = await getGroup(ctx.match[1]);
+    const user  = await db.ensureUser(ctx.from);
+    if (!group || !group.drop_in_eur) return;
+
+    const order = await db.createOrder(user, {
+      type: 'cohort', id: group.id,
+      title: `${group.title} — разовое занятие`,
+      price_eur: group.drop_in_eur,
+    });
+    await ctx.reply(
+      `<b>${escapeHtml(group.title)}</b> — разовое занятие\n` +
+      `К оплате: <b>${money(group.drop_in_eur)}</b>\n\n` +
+      'Выбери способ оплаты:',
+      { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
+    );
+  });
+
+  // --- Разговорный клуб -----------------------------------------------
+  bot.callbackQuery('club:show', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const { data: club } = await db.supabase
+      .from('club').select('*').eq('is_active', true).maybeSingle();
+    if (!club) return ctx.reply('Клуб пока недоступен.', { reply_markup: kbBackMain() });
+
+    const user = await db.ensureUser(ctx.from);
+    const kb = new InlineKeyboard();
+
+    if (club.is_open) {
+      kb.text(`Месяц · ${money(club.price_month)}`, 'club:buy:month').row();
+      kb.text(`Разовое участие · ${money(club.price_dropin)}`, 'club:buy:dropin').row();
+    } else {
+      kb.text('Сообщить, когда откроется', 'club:wl').row();
+    }
+    kb.text('← Назад', 'menu:lessons');
+
+    await screen(ctx,
+      `💬 <b>${escapeHtml(club.title)}</b>\n\n${club.description ?? ''}` +
+      (club.is_open ? '' : '\n\n📭 Набор пока не открыт.'),
+      kb);
+  });
+
+  bot.callbackQuery(/^club:buy:(month|dropin)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const kind = ctx.match[1];
+    const { data: club } = await db.supabase.from('club').select('*').maybeSingle();
+    const user = await db.ensureUser(ctx.from);
+    if (!club) return;
+
+    const price = kind === 'month' ? club.price_month : club.price_dropin;
+    const title = kind === 'month' ? 'Разговорный клуб — месяц' : 'Разговорный клуб — разовое участие';
+
+    const order = await db.createOrder(user, {
+      type: kind === 'month' ? 'subscription' : 'digital',
+      id: club.id, title, price_eur: price,
+    });
+    await ctx.reply(
+      `<b>${title}</b>\nК оплате: <b>${money(price)}</b>\n\nВыбери способ оплаты:`,
+      { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
+    );
+  });
+
+  bot.callbackQuery('club:wl', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const user = await db.ensureUser(ctx.from);
+    await db.supabase.from('waitlist')
+      .upsert({ user_id: user.id, level: 'CLUB' }, { onConflict: 'user_id,level' });
+    await ctx.reply('Записала — напишу, как только откроем клуб 💬',
+      { reply_markup: kbBackMain() });
+    await ctx.api.sendMessage(ENV.ADMIN_CHAT_ID,
+      `💬 Лист ожидания КЛУБ: ${escapeHtml(user.first_name ?? '')} ` +
+      `${user.username ? '@' + user.username : ''}`).catch(() => {});
   });
 
   // --- Продление ------------------------------------------------------
