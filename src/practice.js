@@ -243,6 +243,32 @@ async function showPractice(ctx) {
   );
 }
 
+// Показываем предложение минибука периодически, а не единожды
+async function maybeSuggestMinibook(ctx, user, sub) {
+  // уже покупал — не предлагаем
+  const { data: bought } = await db.supabase
+    .from('orders')
+    .select('id')
+    .eq('user_id', user.id)
+    .eq('product_type', 'digital')
+    .eq('status', 'paid')
+    .limit(1);
+  if (bought?.length) return;
+
+  // не чаще раза в 7 дней
+  const today = kyivToday();
+  if (sub.last_suggest_on && daysBetween(sub.last_suggest_on, today) < 7) return;
+
+  await db.supabase.from('practice_subs')
+    .update({ last_suggest_on: today }).eq('user_id', user.id);
+
+  await ctx.reply(
+    'Кстати 🙂 Тебе явно заходит формат — если хочется системнее, ' +
+    'в минибуке такие же разборы на 70+ страниц и таблицы, к которым удобно возвращаться.',
+    { reply_markup: new InlineKeyboard().text('Посмотреть минибук', 'menu:materials') },
+  );
+}
+
 // ---------------------------------------------------------------------
 export function registerPractice(bot) {
   bot.callbackQuery('menu:practice', async (ctx) => {
@@ -439,13 +465,10 @@ export function registerPractice(bot) {
       { parse_mode: 'HTML', reply_markup: kb },
     ).catch(() => {});
 
-    if (firstTime && sub && (sub.answered_count + 1) === 10) {
-      await ctx.reply(
-        'Десять заданий позади 👏\n\n' +
-        'Если хочется системнее — в минибуке таких разборов больше семидесяти страниц, ' +
-        'и там же таблицы, к которым удобно возвращаться.',
-        { reply_markup: new InlineKeyboard().text('Посмотреть минибук', 'menu:materials') },
-      );
+    // Мягкое предложение минибука: не чаще раза в 7 дней и только тем,
+    // кто ещё не покупал. Первый раз — после 5-го задания.
+    if (firstTime && sub && (sub.answered_count + 1) >= 5) {
+      await maybeSuggestMinibook(ctx, user, sub);
     }
   });
 }
