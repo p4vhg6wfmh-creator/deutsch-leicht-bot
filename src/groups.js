@@ -62,12 +62,18 @@ export async function memberships(userId) {
 // Отрисовка
 // ---------------------------------------------------------------------
 function groupLine(g) {
-  const dot = g.seats_left > 0 ? '🟢' : '🔴';
+  const dot = g.status !== 'recruiting' ? '⚪️' : (g.seats_left > 0 ? '🟢' : '🔴');
+
+  // Интенсив по грамматике — своя подпись, без счётчика мест
+  if (g.level === 'A1-B1') {
+    return `${dot} 🎯 Интенсив по грамматике А1–Б1`;
+  }
+
+  // Обычная группа: формат + уровень + время + места
   const when = g.schedule_text || g.start_note || '';
-  const seats = g.seats_left > 0
-    ? `${g.seats_taken} из ${g.capacity}`
-    : 'мест нет';
-  return `${dot} ${g.level} · ${when} · ${seats}`;
+  const seats = g.seats_left > 0 ? `${g.seats_taken} из ${g.capacity}` : 'мест нет';
+  const tail = [when, seats].filter(Boolean).join(' · ');
+  return `${dot} 👥 Группа ${g.level}${tail ? ' · ' + tail : ''}`;
 }
 
 export async function showGroupList(ctx) {
@@ -84,10 +90,11 @@ export async function showGroupList(ctx) {
   }
   for (const lvl of waitLevels) {
     if (openLevels.has(lvl)) continue;
-    kb.text(`⚪️ ${lvl} — лист ожидания`, `wl:${lvl}`).row();
+    kb.text(`⚪️ ${lvl} группа — лист ожидания`, `wl:${lvl}`).row();
   }
   kb.text('🎓 Индивидуальные уроки', 'slots:days').row();
   kb.text('💬 Разговорный клуб', 'club:show').row();
+  kb.text('✍️ Связаться со мной', 'menu:contact').row();
   kb.text('← В главное меню', 'menu:main');
 
   const text =
