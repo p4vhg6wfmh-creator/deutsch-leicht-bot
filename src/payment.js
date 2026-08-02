@@ -159,9 +159,37 @@ export function registerPayment(bot) {
     const fileId = ctx.message.document?.file_id ?? ctx.message.photo.at(-1).file_id;
     const orderId = user.state_data.order_id;
 
-    await db.updateOrder(orderId, { receipt_file_id: fileId });
-    await db.setState(user.id, STATE.SENDER, { order_id: orderId });
-    await ctx.reply(T.askSender, { parse_mode: 'HTML' });
+    const order = await db.updateOrder(orderId, {
+      receipt_file_id: fileId,
+      status:          'awaiting',
+      submitted_at:    new Date().toISOString(),
+    });
+    await db.clearState(user.id);
+
+    const settings = await db.getSettings();
+    await ctx.reply(isWorkingHours(settings)
+      ? settings.text_paid_working
+      : settings.text_paid_offhours);
+
+    // Карточка владельцу
+    const caption =
+      `🧾 <b>Новая оплата</b>\n\n` +
+      `Заказ: <code>${order.code}</code>\n` +
+      `Продукт: ${escapeHtml(order.title_snapshot)}\n` +
+      (order.amount_flexible
+        ? `Сумма: <b>по прайсу</b>\n`
+        : `Сумма: <b>${money(order.amount_eur)}</b>\n`) +
+      `Способ: ${PAY_METHODS[order.method]?.label ?? order.method}\n` +
+      `Клиент: ${escapeHtml(user.first_name ?? '')} ` +
+      `${user.username ? '@' + user.username : `(id ${user.tg_id})`}`;
+
+    await ctx.api.sendDocument(ENV.ADMIN_CHAT_ID, fileId, {
+      caption, parse_mode: 'HTML', reply_markup: kbAdmin(order.id),
+    }).catch(async () => {
+      await ctx.api.sendPhoto(ENV.ADMIN_CHAT_ID, fileId, {
+        caption, parse_mode: 'HTML', reply_markup: kbAdmin(order.id),
+      });
+    });
   });
 
   // --- Приём имени отправителя → заявка владельцу ---------------------
@@ -193,40 +221,7 @@ export function registerPayment(bot) {
       return ctx.reply(T.contactSent);
     }
 
-    if (user.state !== STATE.SENDER) return next();
-
-    const orderId = user.state_data.order_id;
-    const order = await db.updateOrder(orderId, {
-      sender_name:  ctx.message.text.slice(0, 120),
-      status:       'awaiting',
-      submitted_at: new Date().toISOString(),
-    });
-    await db.clearState(user.id);
-
-    const settings = await db.getSettings();
-    const reply = isWorkingHours(settings)
-      ? settings.text_paid_working
-      : settings.text_paid_offhours;
-    await ctx.reply(reply);
-
-    // Карточка владельцу
-    const caption =
-      `🧾 <b>Новая оплата</b>\n\n` +
-      `Заказ: <code>${order.code}</code>\n` +
-      `Продукт: ${escapeHtml(order.title_snapshot)}\n` +
-      `Сумма: <b>${money(order.amount_eur)}</b>\n` +
-      `Способ: ${PAY_METHODS[order.method]?.label ?? order.method}\n` +
-      `Отправитель: <b>${escapeHtml(order.sender_name)}</b>\n` +
-      `Клиент: ${escapeHtml(user.first_name ?? '')} ` +
-      `${user.username ? '@' + user.username : `(id ${user.tg_id})`}`;
-
-    await ctx.api.sendDocument(ENV.ADMIN_CHAT_ID, order.receipt_file_id, {
-      caption, parse_mode: 'HTML', reply_markup: kbAdmin(order.id),
-    }).catch(async () => {
-      await ctx.api.sendPhoto(ENV.ADMIN_CHAT_ID, order.receipt_file_id, {
-        caption, parse_mode: 'HTML', reply_markup: kbAdmin(order.id),
-      });
-    });
+    return next();
   });
 
   // --- Кнопка «Написать мне» -----------------------------------------
