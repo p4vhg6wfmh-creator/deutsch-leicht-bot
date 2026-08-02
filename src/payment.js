@@ -108,10 +108,12 @@ export function registerPayment(bot) {
 
     await ctx.reply(`<code>${escapeHtml(requisites)}</code>`, { parse_mode: 'HTML' });
 
-    let tail =
-      `Сумма: <b>${money(order.amount_eur)}</b>\n` +
-      `Комментарий к переводу (если есть поле): <code>${order.code}</code>\n\n` +
-      `Как переведёшь — нажми кнопку ниже и пришли квитанцию.`;
+    let tail = order.amount_flexible
+      ? `Комментарий к переводу (если есть поле): <code>${order.code}</code>\n\n` +
+        `Переведи сумму по прайсу и нажми кнопку ниже — пришли квитанцию.`
+      : `Сумма: <b>${money(order.amount_eur)}</b>\n` +
+        `Комментарий к переводу (если есть поле): <code>${order.code}</code>\n\n` +
+        `Как переведёшь — нажми кнопку ниже и пришли квитанцию.`;
 
     if (method === 'paypal' && settings.paypal_fee_note) {
       tail = `${settings.paypal_fee_note}\n\n${tail}`;
