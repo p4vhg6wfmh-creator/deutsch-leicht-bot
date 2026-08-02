@@ -647,6 +647,63 @@ export function registerLessons(bot) {
     );
   });
 
+  // Отправить реквизиты без счёта — когда сумма ещё не согласована
+  //   /pay @username
+  bot.command('pay', async (ctx) => {
+    if (!isOwner(ctx)) return;
+    const who = (ctx.match ?? '').trim().split(/\s+/)[0];
+
+    if (!who) {
+      return ctx.reply(
+        'Отправить реквизиты без фиксированной суммы:\n\n' +
+        '<code>/pay @username</code>\n\n' +
+        'Человек увидит способы оплаты и пришлёт квитанцию на любую ' +
+        'сумму, которую вы обговорили. Подходит, когда цена ещё не решена.',
+        { parse_mode: 'HTML' },
+      );
+    }
+
+    let target = null;
+    if (who.startsWith('@')) {
+      const { data } = await db.supabase
+        .from('users').select('*').ilike('username', who.slice(1)).maybeSingle();
+      target = data;
+    } else if (/^\d+$/.test(who)) {
+      target = await db.getUserByTgId(Number(who));
+    }
+
+    if (!target) {
+      return ctx.reply(
+        `Не нашла ${who}. Пусть человек откроет бота, нажмёт «Старт», потом повтори.`,
+      );
+    }
+
+    // Заказ с нулевой суммой — человек впишет свою при переводе,
+    // а подтверждаешь ты по квитанции как обычно.
+    const order = await db.createOrder(target, {
+      type: 'lesson', id: null,
+      title: 'Индивидуальный урок',
+      price_eur: 0.01,
+    });
+
+    try {
+      await bot.api.sendMessage(
+        target.tg_id,
+        `<b>Оплата занятия</b>\n\n` +
+        'Выбери удобный способ оплаты. Сумму мы обговорили — ' +
+        'переведи её и пришли квитанцию, я подтвержу 🙌',
+        { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
+      );
+    } catch {
+      return ctx.reply('Не смогла отправить — пусть человек нажмёт «Старт» в боте.');
+    }
+
+    await ctx.reply(
+      `Реквизиты отправлены: ${target.username ? '@' + target.username : target.first_name} ✅\n` +
+      'Как пришлёт квитанцию — она придёт сюда на подтверждение.',
+    );
+  });
+
   bot.command('delslots', async (ctx) => {
     if (!isOwner(ctx)) return;
     await loadTz();
