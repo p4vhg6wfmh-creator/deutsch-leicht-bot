@@ -678,20 +678,27 @@ export function registerLessons(bot) {
       );
     }
 
-    // Заказ с нулевой суммой — человек впишет свою при переводе,
-    // а подтверждаешь ты по квитанции как обычно.
+    const s = await db.getSettings();
     const order = await db.createOrder(target, {
       type: 'lesson', id: null,
       title: 'Индивидуальный урок',
-      price_eur: 0.01,
+      price_eur: 0,
     });
+    // помечаем заказ как «сумма свободная»
+    await db.supabase.from('orders')
+      .update({ amount_flexible: true }).eq('id', order.id);
 
     try {
       await bot.api.sendMessage(
         target.tg_id,
-        `<b>Оплата занятия</b>\n\n` +
-        'Выбери удобный способ оплаты. Сумму мы обговорили — ' +
-        'переведи её и пришли квитанцию, я подтвержу 🙌',
+        `<b>Индивидуальные занятия</b>\n\n` +
+        `Разовое занятие\n` +
+        `45 минут — ${money(s.price_single_45 || 12)}\n` +
+        `60 минут — ${money(s.price_single_60 || 14)}\n\n` +
+        `Абонемент на 10 занятий\n` +
+        `45 минут — ${money(s.price_pack_45 || 114)}\n` +
+        `60 минут — ${money(s.price_pack_60 || 130)}\n\n` +
+        `Выбери способ оплаты, переведи нужную сумму и пришли квитанцию 🙌`,
         { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
       );
     } catch {
