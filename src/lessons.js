@@ -164,6 +164,22 @@ export async function deliverPackage(bot, order, tgId) {
 // ---------------------------------------------------------------------
 export async function deliverLesson(bot, order, tgId) {
   await loadTz();
+  const s0 = await db.getSettings();
+
+  // Счёт без слота (выставлен вручную через /invoice) — просто подтверждаем
+  if (!order.product_ref) {
+    await bot.api.sendMessage(
+      tgId,
+      `Оплата подтверждена 🎉\n\n` +
+      `Индивидуальный урок оплачен. До встречи в согласованное время!\n\n` +
+      `<b>Отмена занятия</b>\n${s0.cancel_policy ?? ''}`,
+      { parse_mode: 'HTML' },
+    );
+    await bot.api.sendMessage(ENV.ADMIN_CHAT_ID,
+      `💰 Оплачен индивидуальный урок (счёт вручную).`).catch(() => {});
+    return;
+  }
+
   const slot = await getSlot(order.product_ref);
   if (!slot) return;
 
@@ -558,6 +574,76 @@ export function registerLessons(bot) {
       'Добавить: <code>/addslots 27.07 16:10 18</code>\n' +
       'Удалить свободные за день: <code>/delslots 27.07</code>',
       { parse_mode: 'HTML' },
+    );
+  });
+
+  // Выставить счёт за индивидуальный урок вручную (когда время согласовано лично)
+  //   /invoice @username 14
+  //   /invoice @username 14 45   (45-минутный)
+  //   /invoice 123456789 12
+  bot.command('invoice', async (ctx) => {
+    if (!isOwner(ctx)) return;
+    const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
+
+    if (parts.length < 2) {
+      const s = await db.getSettings();
+      return ctx.reply(
+        'Выставить счёт за индивидуальный урок:\n\n' +
+        '<code>/invoice @username сумма</code>\n' +
+        '<code>/invoice 123456789 сумма</code>\n\n' +
+        `Разовое: 45 мин — ${s.price_single_45 || 12} €, 60 мин — ${s.price_single_60 || 14} €.\n` +
+        'Человек должен хотя бы раз написать боту — иначе я не смогу ему отправить счёт.',
+        { parse_mode: 'HTML' },
+      );
+    }
+
+    const who = parts[0];
+    const amount = Number(parts[1].replace(',', '.'));
+    if (!(amount > 0)) return ctx.reply('Сумма должна быть числом. Пример: /invoice @anna 14');
+
+    // Находим пользователя
+    let target = null;
+    if (who.startsWith('@')) {
+      const { data } = await db.supabase
+        .from('users').select('*').ilike('username', who.slice(1)).maybeSingle();
+      target = data;
+    } else if (/^\d+$/.test(who)) {
+      target = await db.getUserByTgId(Number(who));
+    }
+
+    if (!target) {
+      return ctx.reply(
+        `Не нашла ${who} среди тех, кто писал боту.\n\n` +
+        'Попроси человека открыть @' + (ctx.me?.username ?? 'бота') + ' и нажать «Старт», ' +
+        'потом повтори команду. Или укажи его числовой id.',
+      );
+    }
+
+    const order = await db.createOrder(target, {
+      type: 'lesson', id: null,
+      title: `Индивидуальный урок`,
+      price_eur: amount,
+    });
+
+    // Шлём счёт клиенту
+    try {
+      await bot.api.sendMessage(
+        target.tg_id,
+        `<b>Индивидуальный урок</b>\n` +
+        `К оплате: <b>${money(amount)}</b>\n\n` +
+        'Выбери способ оплаты, и после перевода пришли квитанцию 🙌',
+        { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
+      );
+    } catch (e) {
+      return ctx.reply(
+        'Не смогла отправить счёт — возможно, человек не запускал бота ' +
+        'или заблокировал его. Пусть нажмёт «Старт» и напишет что-нибудь.',
+      );
+    }
+
+    await ctx.reply(
+      `Счёт отправлен: ${target.username ? '@' + target.username : target.first_name} · ${money(amount)} ✅\n` +
+      'Как оплатит и пришлёт квитанцию — она придёт сюда на подтверждение.',
     );
   });
 
