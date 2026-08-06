@@ -3,6 +3,7 @@ import { getBot } from '../../src/bot.js';
 import { runRenewalReminders } from '../../src/groups.js';
 import { releaseExpiredHolds, sendLessonReminders } from '../../src/lessons.js';
 import { runWinback } from '../../src/practice.js';
+import { sendEveningReminder } from '../../src/admin.js';
 
 const TZ = 'Europe/Kyiv';
 const kyivHour = () => Number(new Intl.DateTimeFormat('en-GB', {
@@ -17,13 +18,19 @@ export default async () => {
     const released = await releaseExpiredHolds();
     const lessons  = await sendLessonReminders(bot);
 
-    let renewals = 0, winback = 0;
-    if (kyivHour() === 10) {          // раз в сутки
+    let renewals = 0, winback = 0, evening = 0;
+    const h = kyivHour();
+
+    if (h === 10) {                   // раз в сутки утром
       renewals = await runRenewalReminders(bot);
       winback  = await runWinback(bot);
     }
 
-    console.log(`holds:${released} lessons:${lessons} renewals:${renewals} winback:${winback}`);
+    if (h === 21) {                   // вечернее напоминание в 21:00 по Киеву
+      evening = await sendEveningReminder(bot);
+    }
+
+    console.log(`holds:${released} lessons:${lessons} renewals:${renewals} winback:${winback} evening:${evening}`);
     return new Response('ok', { status: 200 });
   } catch (e) {
     console.error('CRON ERROR', e);
