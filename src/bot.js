@@ -6,6 +6,7 @@ import { registerGroups } from './groups.js';
 import { registerPractice } from './practice.js';
 import { registerLessons } from './lessons.js';
 import { registerExtras } from './extras.js';
+import { registerAdmin } from './admin.js';
 import * as db from './db.js';
 
 let _bot = null;
@@ -21,6 +22,7 @@ export function getBot() {
   registerPractice(bot);
   registerLessons(bot);
   registerPayment(bot);
+  registerAdmin(bot);
 
   bot.command('help', (ctx) =>
     ctx.reply('Напиши мне прямо сюда — я отвечу лично 🙌'),
