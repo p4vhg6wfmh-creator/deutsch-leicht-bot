@@ -54,7 +54,7 @@ async function showCabinet(ctx) {
     .text('📅 Сегодня', 'tc:today').text('📖 Уроки', 'tc:lessons').row()
     .text('💰 Записать оплату', 'tc:pay').row()
     .text('📊 За месяц', 'tc:month').text('📈 За неделю', 'tc:week').row()
-    .text('👤 Ученики', 'tc:students');
+    .text('💵 Оплаты', 'tc:payments').text('👤 Ученики', 'tc:students');
 
   await ctx.reply(
     '📚 <b>Кабинет учителя</b>\n\nВыбери, что сделать:',
@@ -192,13 +192,82 @@ export function registerTeacher(bot) {
     const { data } = await db.supabase
       .from('tc_lessons').select('*')
       .order('lesson_date', { ascending: false }).limit(15);
-    let txt = '📖 <b>Последние уроки</b>\n\n';
-    for (const l of data ?? [])
+    if (!data?.length) {
+      return ctx.reply('Пока пусто', {
+        reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+    }
+    let txt = '📖 <b>Последние уроки</b>\n\nНажми 🗑, чтобы удалить запись.\n\n';
+    const kb = new InlineKeyboard();
+    for (const l of data) {
       txt += `${fmtDate(l.lesson_date)} ${l.lesson_time || ''} · ${l.student_name} · ${uah(l.price_uah)} · ${STATUS[l.status]}\n`;
-    await ctx.reply(txt || 'Пока пусто', {
-      parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home'),
-    });
+      kb.text(`🗑 ${l.student_name} ${fmtDate(l.lesson_date)}`, `tc:dellesson:${l.id}`).row();
+    }
+    kb.text('← В кабинет', 'tc:home');
+    await ctx.reply(txt, { parse_mode: 'HTML', reply_markup: kb });
+  });
+
+  // Удаление урока — с подтверждением
+  bot.callbackQuery(/^tc:dellesson:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const { data: l } = await db.supabase
+      .from('tc_lessons').select('*').eq('id', ctx.match[1]).maybeSingle();
+    if (!l) return ctx.reply('Запись уже удалена.');
+    const kb = new InlineKeyboard()
+      .text('🗑 Да, удалить', `tc:dellesson2:${l.id}`)
+      .text('Отмена', 'tc:lessons');
+    await ctx.reply(
+      `Удалить урок?\n${l.student_name} · ${fmtDate(l.lesson_date)} ${l.lesson_time || ''} · ${uah(l.price_uah)}`,
+      { reply_markup: kb });
+  });
+  bot.callbackQuery(/^tc:dellesson2:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await db.supabase.from('tc_lessons').delete().eq('id', ctx.match[1]);
+    await ctx.answerCallbackQuery({ text: 'Удалено' });
+    await ctx.reply('Урок удалён 🗑', {
+      reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+  });
+
+  // ---------- ОПЛАТЫ (список + удаление) ----------
+  bot.callbackQuery('tc:payments', async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const { data } = await db.supabase
+      .from('tc_payments').select('*')
+      .order('pay_date', { ascending: false }).limit(15);
+    if (!data?.length) {
+      return ctx.reply('Оплат пока нет', {
+        reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+    }
+    const KIND = { single: 'разовая', package: 'абонемент', other: 'другое' };
+    let txt = '💰 <b>Последние оплаты</b>\n\nНажми 🗑, чтобы удалить.\n\n';
+    const kb = new InlineKeyboard();
+    for (const p of data) {
+      txt += `${fmtDate(p.pay_date)} · ${p.student_name} · ${uah(p.amount_uah)} · ${KIND[p.kind]}\n`;
+      kb.text(`🗑 ${p.student_name} ${uah(p.amount_uah)}`, `tc:delpay:${p.id}`).row();
+    }
+    kb.text('← В кабинет', 'tc:home');
+    await ctx.reply(txt, { parse_mode: 'HTML', reply_markup: kb });
+  });
+  bot.callbackQuery(/^tc:delpay:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const { data: p } = await db.supabase
+      .from('tc_payments').select('*').eq('id', ctx.match[1]).maybeSingle();
+    if (!p) return ctx.reply('Запись уже удалена.');
+    const kb = new InlineKeyboard()
+      .text('🗑 Да, удалить', `tc:delpay2:${p.id}`)
+      .text('Отмена', 'tc:payments');
+    await ctx.reply(
+      `Удалить оплату?\n${p.student_name} · ${uah(p.amount_uah)} · ${fmtDate(p.pay_date)}`,
+      { reply_markup: kb });
+  });
+  bot.callbackQuery(/^tc:delpay2:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await db.supabase.from('tc_payments').delete().eq('id', ctx.match[1]);
+    await ctx.answerCallbackQuery({ text: 'Удалено' });
+    await ctx.reply('Оплата удалена 🗑', {
+      reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
   });
 
   // ---------- ОТЧЁТЫ ----------
@@ -255,18 +324,29 @@ export function registerTeacher(bot) {
     await ctx.answerCallbackQuery();
     const list = await students();
     let txt = '👤 <b>Ученики</b>\n\n';
+    const kb = new InlineKeyboard();
     for (const s of list) {
       const { count } = await db.supabase.from('tc_lessons')
         .select('id', { count: 'exact', head: true })
         .eq('student_id', s.id).eq('status', 'done');
-      txt += `${s.name} — ${count ?? 0} уроков\n`;
+      const price = s.default_price_uah ? `${Number(s.default_price_uah).toFixed(0)} грн` : 'цена не задана';
+      txt += `${s.name} — ${count ?? 0} уроков · ${price}\n`;
+      kb.text(`💵 ${s.name}`, `tc:setprice:${s.id}`).row();
     }
-    await ctx.reply(txt || 'Пока никого', {
-      parse_mode: 'HTML',
-      reply_markup: new InlineKeyboard()
-        .text('➕ Новый ученик', 'tc:newstud').row()
-        .text('← В кабинет', 'tc:home'),
-    });
+    kb.text('➕ Новый ученик', 'tc:newstud').row();
+    kb.text('← В кабинет', 'tc:home');
+    await ctx.reply(txt || 'Пока никого', { parse_mode: 'HTML', reply_markup: kb });
+  });
+
+  // Изменить привычную цену ученика
+  bot.callbackQuery(/^tc:setprice:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const u = await db.ensureUser(ctx.from);
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('name').eq('id', ctx.match[1]).single();
+    await db.setState(u.id, 'tc_setprice', { student_id: ctx.match[1] });
+    await ctx.reply(`Новая цена урока для ${stud.name}? Напиши сумму в гривнах.`);
   });
 
   // ---------- Приём текстовых ответов (состояния) ----------
@@ -307,28 +387,37 @@ export function registerTeacher(bot) {
     }
 
     if (st === 'tc_time') {
-      await db.setState(u.id, 'tc_price',
-        { ...u.state_data, time: txt === '-' ? null : txt });
+      const sd = { ...u.state_data, time: txt === '-' ? null : txt };
+      await db.setState(u.id, 'tc_price', sd);
+      // есть ли цена по умолчанию у ученика
+      const { data: stud } = await db.supabase
+        .from('tc_students').select('name, default_price_uah').eq('id', sd.student_id).single();
+      if (stud?.default_price_uah > 0) {
+        const kb = new InlineKeyboard()
+          .text(`${Number(stud.default_price_uah).toFixed(0)} грн (как обычно)`, `tc:useprice:${stud.default_price_uah}`).row()
+          .text('Другая сумма', 'tc:otherprice');
+        return ctx.reply(`Цена урока для ${stud.name}?`, { reply_markup: kb });
+      }
       return ctx.reply('Цена урока в гривнах? Например 700\n(или «0», если бесплатно/абонемент)');
     }
 
     if (st === 'tc_price') {
       const price = Number(txt.replace(',', '.')) || 0;
-      const { student_id, time } = u.state_data;
+      await saveLesson(ctx, price);
+      return;
+    }
+
+    if (st === 'tc_setprice') {
+      const price = Number(txt.replace(',', '.'));
+      if (!(price >= 0)) return ctx.reply('Нужна сумма числом, например 700');
       const { data: stud } = await db.supabase
-        .from('tc_students').select('name').eq('id', student_id).single();
-      await db.supabase.from('tc_lessons').insert({
-        student_id, student_name: stud.name,
-        lesson_date: today(), lesson_time: time, price_uah: price,
-        status: 'planned',
-      });
+        .from('tc_students')
+        .update({ default_price_uah: price })
+        .eq('id', u.state_data.student_id).select('name').single();
       await db.clearState(u.id);
-      const kb = new InlineKeyboard()
-        .text('📅 Сегодня', 'tc:today').row()
-        .text('← В кабинет', 'tc:home');
-      return ctx.reply(
-        `Записала урок: ${stud.name}${time ? ' в ' + time : ''} · ${uah(price)} ✅`,
-        { reply_markup: kb });
+      return ctx.reply(`Готово: цена для ${stud.name} теперь ${price} грн ✅`, {
+        reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home'),
+      });
     }
 
     if (st === 'tc_payamount') {
@@ -343,6 +432,43 @@ export function registerTeacher(bot) {
 
     return next();
   });
+
+  // Быстрый выбор привычной цены
+  bot.callbackQuery(/^tc:useprice:(\d+(?:\.\d+)?)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    await saveLesson(ctx, Number(ctx.match[1]));
+  });
+  bot.callbackQuery('tc:otherprice', async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    await ctx.reply('Напиши сумму в гривнах, например 700');
+  });
+
+  // Общая функция сохранения урока
+  async function saveLesson(ctx, price) {
+    const u = await db.ensureUser(ctx.from);
+    const { student_id, time } = u.state_data ?? {};
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('name, default_price_uah').eq('id', student_id).single();
+    await db.supabase.from('tc_lessons').insert({
+      student_id, student_name: stud.name,
+      lesson_date: today(), lesson_time: time, price_uah: price,
+      status: 'planned',
+    });
+    // запоминаем цену как обычную, если её ещё не было
+    if (!stud.default_price_uah && price > 0) {
+      await db.supabase.from('tc_students')
+        .update({ default_price_uah: price }).eq('id', student_id);
+    }
+    await db.clearState(u.id);
+    const kb = new InlineKeyboard()
+      .text('📅 Сегодня', 'tc:today').row()
+      .text('← В кабинет', 'tc:home');
+    await ctx.reply(
+      `Записала урок: ${stud.name}${time ? ' в ' + time : ''} · ${price} грн ✅`,
+      { reply_markup: kb });
+  }
 
   // Тип оплаты → сохраняем
   bot.callbackQuery(/^tc:pk:(\w+)$/, async (ctx) => {
