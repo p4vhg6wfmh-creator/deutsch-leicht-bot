@@ -230,6 +230,10 @@ export function registerExtras(bot) {
   // -------------------------------------------------------------------
   bot.on('message', async (ctx) => {
     if (ctx.chat.type !== 'private') return;
+     // Если человек в процессе оплаты/сценария — не перехватываем, пусть доработают остальные
+    const u0 = await db.getUserByTgId(ctx.from.id);
+    if (u0?.state) return;
+    
 
     const user = await db.ensureUser(ctx.from);
     const text = ctx.message.text ?? '';
