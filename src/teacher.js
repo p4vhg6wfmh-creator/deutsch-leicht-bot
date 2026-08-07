@@ -77,11 +77,16 @@ export function registerTeacher(bot) {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     await ctx.answerCallbackQuery();
     const list = await students();
+    if (!list.length) {
+      const u = await db.ensureUser(ctx.from);
+      await db.setState(u.id, 'tc_new_student_then_lesson', {});
+      return ctx.reply('С кем урок? Напиши имя ученика — я его сразу добавлю.');
+    }
     const kb = new InlineKeyboard();
     for (const s of list) kb.text(s.name, `tc:nl:${s.id}`).row();
     kb.text('➕ Новый ученик', 'tc:newstud').row();
     kb.text('← Назад', 'tc:home');
-    await ctx.reply('С кем урок?', { reply_markup: kb });
+    await ctx.reply('С кем урок? Выбери или добавь нового.', { reply_markup: kb });
   });
 
   // Новый ученик — просим имя
@@ -107,10 +112,25 @@ export function registerTeacher(bot) {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     await ctx.answerCallbackQuery();
     const list = await students();
+    if (!list.length) {
+      const u = await db.ensureUser(ctx.from);
+      await db.setState(u.id, 'tc_new_student_then_pay', {});
+      return ctx.reply('От кого оплата? Напиши имя ученика — я его сразу добавлю.');
+    }
     const kb = new InlineKeyboard();
     for (const s of list) kb.text(s.name, `tc:pl:${s.id}`).row();
+    kb.text('➕ Новый ученик', 'tc:pnew').row();
     kb.text('← Назад', 'tc:home');
-    await ctx.reply('От кого оплата?', { reply_markup: kb });
+    await ctx.reply('От кого оплата? Выбери или добавь нового.', { reply_markup: kb });
+  });
+
+  // Новый ученик со стороны оплаты
+  bot.callbackQuery('tc:pnew', async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const u = await db.ensureUser(ctx.from);
+    await db.setState(u.id, 'tc_new_student_then_pay', {});
+    await ctx.reply('Напиши имя ученика — я его добавлю.');
   });
 
   bot.callbackQuery(/^tc:pl:(.+)$/, async (ctx) => {
@@ -266,6 +286,24 @@ export function registerTeacher(bot) {
         .text('Записать ему урок', `tc:nl:${s.id}`).row()
         .text('← В кабинет', 'tc:home');
       return ctx.reply(`Добавила ученика: ${s.name} ✅`, { reply_markup: kb });
+    }
+
+    // Новый ученик → сразу к записи урока
+    if (st === 'tc_new_student_then_lesson') {
+      const s = await ensureStudent(txt);
+      await db.setState(u.id, 'tc_time', { student_id: s.id });
+      return ctx.reply(
+        `Ученик ${s.name} добавлен ✅\n\nВо сколько урок? Например 16:00 (или «-», если без времени)`,
+      );
+    }
+
+    // Новый ученик → сразу к записи оплаты
+    if (st === 'tc_new_student_then_pay') {
+      const s = await ensureStudent(txt);
+      await db.setState(u.id, 'tc_payamount', { student_id: s.id });
+      return ctx.reply(
+        `Ученик ${s.name} добавлен ✅\n\nСколько заплатили? Сумма в гривнах, например 700`,
+      );
     }
 
     if (st === 'tc_time') {
