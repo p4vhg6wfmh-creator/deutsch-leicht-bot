@@ -179,8 +179,28 @@ export function registerTeacher(bot) {
   for (const [act, st] of [['done','done'],['cancel','cancelled'],['noshow','noshow']]) {
     bot.callbackQuery(new RegExp(`^tc:${act}:(.+)$`), async (ctx) => {
       if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+
+      // берём урок ДО обновления, чтобы не списать дважды
+      const { data: les } = await db.supabase
+        .from('tc_lessons').select('*').eq('id', ctx.match[1]).maybeSingle();
+
       await db.supabase.from('tc_lessons').update({ status: st }).eq('id', ctx.match[1]);
-      await ctx.answerCallbackQuery({ text: STATUS[st] });
+
+      // Списываем из абонемента только при переходе в «проведён»
+      let extra = '';
+      if (st === 'done' && les && les.status !== 'done' && les.student_id) {
+        const { data: stud } = await db.supabase
+          .from('tc_students').select('name, package_left').eq('id', les.student_id).single();
+        if (stud && stud.package_left > 0) {
+          const left = stud.package_left - 1;
+          await db.supabase.from('tc_students')
+            .update({ package_left: left }).eq('id', les.student_id);
+          extra = left > 0
+            ? ` · абонемент: осталось ${left}`
+            : ` · абонемент закончился ⚠️`;
+        }
+      }
+      await ctx.answerCallbackQuery({ text: STATUS[st] + extra });
       await sendToday(ctx);
     });
   }
@@ -330,7 +350,8 @@ export function registerTeacher(bot) {
         .select('id', { count: 'exact', head: true })
         .eq('student_id', s.id).eq('status', 'done');
       const price = s.default_price_uah ? `${Number(s.default_price_uah).toFixed(0)} грн` : 'цена не задана';
-      txt += `${s.name} — ${count ?? 0} уроков · ${price}\n`;
+      const pack = s.package_left > 0 ? ` · 🎟 абонемент: ${s.package_left}` : '';
+      txt += `${s.name} — ${count ?? 0} уроков · ${price}${pack}\n`;
       kb.text(`💵 ${s.name}`, `tc:setprice:${s.id}`).row();
     }
     kb.text('➕ Новый ученик', 'tc:newstud').row();
@@ -420,6 +441,29 @@ export function registerTeacher(bot) {
       });
     }
 
+    if (st === 'tc_packcount') {
+      const count = parseInt(txt, 10);
+      if (!(count > 0)) return ctx.reply('Нужно число уроков, например 10');
+      const { student_id, amount } = u.state_data;
+      const { data: stud } = await db.supabase
+        .from('tc_students').select('name, package_left').eq('id', student_id).single();
+      await db.supabase.from('tc_payments').insert({
+        student_id, student_name: stud.name,
+        amount_uah: amount, pay_date: today(), kind: 'package',
+        note: `абонемент ${count} уроков`,
+      });
+      // добавляем уроки к остатку (если старый абонемент не закончился — плюсуем)
+      await db.supabase.from('tc_students').update({
+        package_left: (stud.package_left || 0) + count,
+        package_total: count,
+      }).eq('id', student_id);
+      await db.clearState(u.id);
+      return ctx.reply(
+        `Абонемент записан: ${stud.name} · ${uah(amount)} · ${count} уроков ✅\n` +
+        `Теперь на балансе: ${(stud.package_left || 0) + count} уроков.`,
+        { reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+    }
+
     if (st === 'tc_payamount') {
       const amount = Number(txt.replace(',', '.'));
       if (!(amount > 0)) return ctx.reply('Нужна сумма числом, например 700');
@@ -477,6 +521,14 @@ export function registerTeacher(bot) {
     const u = await db.ensureUser(ctx.from);
     const { student_id, amount } = u.state_data ?? {};
     if (!amount) { await ctx.answerCallbackQuery(); return; }
+
+    // Абонемент — спрашиваем количество уроков перед сохранением
+    if (kind === 'package') {
+      await db.setState(u.id, 'tc_packcount', { student_id, amount });
+      await ctx.answerCallbackQuery();
+      return ctx.reply('Сколько уроков в абонементе? Напиши число, например 10');
+    }
+
     const { data: stud } = await db.supabase
       .from('tc_students').select('name').eq('id', student_id).single();
     await db.supabase.from('tc_payments').insert({
