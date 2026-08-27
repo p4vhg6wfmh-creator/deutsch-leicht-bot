@@ -126,22 +126,10 @@ async function showGroupCard(ctx, group, prefix = '') {
     `${when}\n` +
     `Платформа: ${escapeHtml(group.platform)}\n` +
     `Стоимость: <b>${money(group.price_eur)}</b> в месяц` +
-    (group.drop_in_eur ? ` · разовое ${money(group.drop_in_eur)}` : '') + `\n` +
-    `Мест занято: ${group.seats_taken} из ${group.capacity}`;
+    (group.drop_in_eur ? ` · разовое ${money(group.drop_in_eur)}` : '');
 
   const kb = new InlineKeyboard();
-  if (member && member.status !== 'left') {
-    kb.text('✅ Ты уже записана(-н)', 'noop').row();
-  } else if (group.status !== 'recruiting') {
-    kb.text('Сообщить, когда откроется набор', `wl:${group.level}`).row();
-  } else if (group.seats_left > 0) {
-    kb.text('Забронировать место', `grpjoin:${group.id}`).row();
-    if (group.drop_in_eur) {
-      kb.text(`Разовое занятие · ${money(group.drop_in_eur)}`, `grpdrop:${group.id}`).row();
-    }
-  } else {
-    kb.text('Мест нет — сообщить, если освободится', `wl:${group.level}`).row();
-  }
+  kb.text('Хочу заниматься в этой группе', `grpwant:${group.id}`).row();
   kb.text('← Назад к списку', 'menu:lessons').row();
   kb.text('☰ Главное меню', 'menu:main');
 
@@ -313,26 +301,45 @@ export function registerGroups(bot) {
     await showGroupCard(ctx, group);
   });
 
-  // --- Бронь места: спрашиваем удобное время --------------------------
-  bot.callbackQuery(/^grpjoin:(.+)$/, async (ctx) => {
+  // --- Шаг 1: человек нажал «Хочу заниматься» — подтверждаем намерение ---
+  bot.callbackQuery(/^grpwant:(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
-    const groupId = ctx.match[1];
-    const group = await getGroup(groupId);
-    if (!group || group.seats_left <= 0) {
-      return ctx.reply('Места закончились 🙈', { reply_markup: kbBackMain() });
+    const group = await getGroup(ctx.match[1]);
+    if (!group) return;
+
+    const kb = new InlineKeyboard();
+    kb.text('Да, дайте ссылку', `grplink:${group.id}`).row();
+    kb.text('Пока просто смотрю', `grp:${group.id}`).row();
+
+    await ctx.reply(
+      `Занятия в группе <b>${escapeHtml(group.title)}</b>.\n\n` +
+      `Стоимость: <b>${money(group.price_eur)}</b> в месяц` +
+      (group.drop_in_eur ? ` · разовое ${money(group.drop_in_eur)}` : '') + `.\n` +
+      'Оплату и удобное время обсудим прямо в группе.\n\n' +
+      'Если планируешь заниматься — дам ссылку, переходи и присоединяйся 👇',
+      { parse_mode: 'HTML', reply_markup: kb },
+    );
+  });
+
+  // --- Шаг 2: подтвердил — отправляем ссылку на живую группу ------------
+  bot.callbackQuery(/^grplink:(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const group = await getGroup(ctx.match[1]);
+    if (!group) return;
+
+    const link = GROUP_LINKS[group.level];
+    if (!link) {
+      return ctx.reply('Ссылка пока готовится, напиши мне — добавлю вручную 🙌',
+        { reply_markup: kbBackMain() });
     }
 
     const kb = new InlineKeyboard();
-    for (const [code, label] of Object.entries(TIME_SLOTS)) {
-      kb.text(label, `grptime:${groupId}:${code}`).row();
-    }
+    kb.url('Перейти в группу', link).row();
+    kb.text('☰ Главное меню', 'menu:main');
 
     await ctx.reply(
-      'Отлично! Один вопрос, чтобы собрать расписание под группу.\n\n' +
-      `Занятие длится <b>${group.lesson_length} минут</b>, два раза в неделю. ` +
-      'Выбери промежуток, в который тебе удобно заниматься — ' +
-      'расписание соберу по ответам всей группы.\n\n' +
-      '<b>Когда тебе удобнее?</b>',
+      `Вот ссылка на группу <b>${escapeHtml(group.title)}</b> 🎉\n\n` +
+      'Переходи, знакомься — я там на связи. До встречи!',
       { parse_mode: 'HTML', reply_markup: kb },
     );
   });
