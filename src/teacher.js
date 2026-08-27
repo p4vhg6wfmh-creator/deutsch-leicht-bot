@@ -557,7 +557,6 @@ export async function sendEveningReminder(bot) {
 
   let txt = planned.length
     ? `🌙 <b>Итоги дня</b>\n\nНе отмечены уроки:\n`
-    : `🌙 <b>Итоги дня</b>\n\nНа сегодня уроков не записано. Спокойной ночи! 🌷`;
   const kb = new InlineKeyboard();
   for (const l of planned) {
     txt += `${l.lesson_time || '—'} · ${l.student_name}\n`;
@@ -566,6 +565,8 @@ export async function sendEveningReminder(bot) {
   kb.text('📅 Открыть день', 'tc:today');
 
   await bot.api.sendMessage(ENV.OWNER_TG_ID, txt, {
-    parse_mode: 'HTML', reply_markup: kb,
+    parse_mode: 'HTML',
+    reply_markup: planned.length ? kb : undefined,
+  }).catch(() => {});
   }).catch(() => {});
 }
