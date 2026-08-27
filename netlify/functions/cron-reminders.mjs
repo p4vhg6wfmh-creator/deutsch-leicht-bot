@@ -14,10 +14,7 @@ export default async () => {
   const bot = getBot();
   await bot.init();
 
-  try {
-    const released = await releaseExpiredHolds();
-    const lessons  = await sendLessonReminders(bot);
-
+   try {
     let renewals = 0, winback = 0, evening = 0;
     const h = kyivHour();
 
@@ -30,7 +27,7 @@ export default async () => {
       evening = await sendEveningReminder(bot);
     }
 
-    console.log(`holds:${released} lessons:${lessons} renewals:${renewals} winback:${winback} evening:${evening}`);
+    console.log(`renewals:${renewals} winback:${winback} evening:${evening}`);
     return new Response('ok', { status: 200 });
   } catch (e) {
     console.error('CRON ERROR', e);
