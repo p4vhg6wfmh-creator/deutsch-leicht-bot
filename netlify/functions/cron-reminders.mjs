@@ -3,7 +3,7 @@ import { getBot } from '../../src/bot.js';
 import { runRenewalReminders } from '../../src/groups.js';
 import { releaseExpiredHolds, sendLessonReminders } from '../../src/lessons.js';
 import { runWinback } from '../../src/practice.js';
-import { sendEveningReminder } from '../../src/admin.js';
+import { sendEveningReminder } from '../../src/teacher.js';
 
 const TZ = 'Europe/Kyiv';
 const kyivHour = () => Number(new Intl.DateTimeFormat('en-GB', {
