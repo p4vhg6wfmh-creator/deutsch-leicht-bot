@@ -12,6 +12,12 @@ export const TIME_SLOTS = {
   evening:   '🌙 Вечер · 18:00–21:00',
   any:       'Мне подойдёт любое',
 };
+// Ссылки на живые Telegram-группы по уровням
+const GROUP_LINKS = {
+  A1: 'https://t.me/A1deutschgruppe',
+  A2: 'https://t.me/A2deutschgruppe',
+  B1: 'https://t.me/b1deutschgruppe',
+};
 
 // ---------------------------------------------------------------------
 // Доступ к данным
