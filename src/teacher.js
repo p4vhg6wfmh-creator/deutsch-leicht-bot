@@ -569,5 +569,4 @@ export async function sendEveningReminder(bot) {
     parse_mode: 'HTML',
     reply_markup: planned.length ? kb : undefined,
   }).catch(() => {});
-  }).catch(() => {});
 }
