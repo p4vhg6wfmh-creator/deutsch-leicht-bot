@@ -555,8 +555,9 @@ export async function sendEveningReminder(bot) {
 
   const planned = (lessons ?? []).filter((l) => l.status === 'planned');
 
-  let txt = planned.length
+   let txt = planned.length
     ? `🌙 <b>Итоги дня</b>\n\nНе отмечены уроки:\n`
+    : `🌙 <b>Итоги дня</b>\n\nНа сегодня уроков не записано. Спокойной ночи! 🌷`;
   const kb = new InlineKeyboard();
   for (const l of planned) {
     txt += `${l.lesson_time || '—'} · ${l.student_name}\n`;
