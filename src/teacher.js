@@ -16,7 +16,6 @@ function fmtDate(d) {
   return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' })
     .format(new Date(d + 'T12:00:00'));
 }
-
 function isOwner(ctx) {
   return String(ctx.from?.id) === String(ENV.OWNER_TG_ID);
 }
@@ -36,6 +35,7 @@ async function students() {
     .from('tc_students').select('*').eq('is_active', true).order('name');
   return data ?? [];
 }
+
 async function ensureStudent(name) {
   const { data: ex } = await db.supabase
     .from('tc_students').select('*').ilike('name', name).maybeSingle();
@@ -55,7 +55,6 @@ async function showCabinet(ctx) {
     .text('💰 Записать оплату', 'tc:pay').row()
     .text('📊 За месяц', 'tc:month').text('📈 За неделю', 'tc:week').row()
     .text('💵 Оплаты', 'tc:payments').text('👤 Ученики', 'tc:students');
-
   await ctx.reply(
     '📚 <b>Кабинет учителя</b>\n\nВыбери, что сделать:',
     { parse_mode: 'HTML', reply_markup: kb },
@@ -154,13 +153,11 @@ export function registerTeacher(bot) {
     const { data: lessons } = await db.supabase
       .from('tc_lessons').select('*').eq('lesson_date', d)
       .order('lesson_time', { ascending: true });
-
     if (!lessons?.length) {
       return ctx.reply('На сегодня уроков нет.', {
         reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home'),
       });
     }
-
     const kb = new InlineKeyboard();
     let txt = `📅 <b>Сегодня, ${fmtDate(d)}</b>\n\n`;
     for (const l of lessons) {
@@ -179,13 +176,10 @@ export function registerTeacher(bot) {
   for (const [act, st] of [['done','done'],['cancel','cancelled'],['noshow','noshow']]) {
     bot.callbackQuery(new RegExp(`^tc:${act}:(.+)$`), async (ctx) => {
       if (!isOwner(ctx)) return ctx.answerCallbackQuery();
-
       // берём урок ДО обновления, чтобы не списать дважды
       const { data: les } = await db.supabase
         .from('tc_lessons').select('*').eq('id', ctx.match[1]).maybeSingle();
-
       await db.supabase.from('tc_lessons').update({ status: st }).eq('id', ctx.match[1]);
-
       // Списываем из абонемента только при переходе в «проведён»
       let extra = '';
       if (st === 'done' && les && les.status !== 'done' && les.student_id) {
@@ -297,7 +291,6 @@ export function registerTeacher(bot) {
     await report(ctx, monthStart(), today(), 'за месяц');
   });
   bot.command('month', (ctx) => { if (isOwner(ctx)) return report(ctx, monthStart(), today(), 'за месяц'); });
-
   bot.callbackQuery('tc:week', async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     await ctx.answerCallbackQuery();
@@ -312,19 +305,16 @@ export function registerTeacher(bot) {
     const { data: pays } = await db.supabase
       .from('tc_payments').select('*')
       .gte('pay_date', from).lte('pay_date', to);
-
     const done = (lessons ?? []).filter((l) => l.status === 'done');
     const cancelled = (lessons ?? []).filter((l) => l.status === 'cancelled' || l.status === 'noshow');
     const earned = (pays ?? []).reduce((a, p) => a + Number(p.amount_uah), 0);
     const lessonSum = done.reduce((a, l) => a + Number(l.price_uah), 0);
-
     // по ученикам
     const byStud = {};
     for (const l of done) byStud[l.student_name] = (byStud[l.student_name] || 0) + 1;
     const studLines = Object.entries(byStud)
       .sort((a, b) => b[1] - a[1])
       .map(([n, c]) => `  ${n} — ${c}`).join('\n');
-
     await ctx.reply(
       `📊 <b>Отчёт ${label}</b>\n` +
       `${fmtDate(from)} — ${fmtDate(to)}\n\n` +
@@ -377,7 +367,6 @@ export function registerTeacher(bot) {
     const u = await db.ensureUser(ctx.from);
     const st = u.state;
     if (!st || !st.startsWith('tc_')) return next();
-
     const txt = ctx.message.text.trim();
 
     if (st === 'tc_newstud') {
@@ -388,7 +377,6 @@ export function registerTeacher(bot) {
         .text('← В кабинет', 'tc:home');
       return ctx.reply(`Добавила ученика: ${s.name} ✅`, { reply_markup: kb });
     }
-
     // Новый ученик → сразу к записи урока
     if (st === 'tc_new_student_then_lesson') {
       const s = await ensureStudent(txt);
@@ -397,7 +385,6 @@ export function registerTeacher(bot) {
         `Ученик ${s.name} добавлен ✅\n\nВо сколько урок? Например 16:00 (или «-», если без времени)`,
       );
     }
-
     // Новый ученик → сразу к записи оплаты
     if (st === 'tc_new_student_then_pay') {
       const s = await ensureStudent(txt);
@@ -406,7 +393,6 @@ export function registerTeacher(bot) {
         `Ученик ${s.name} добавлен ✅\n\nСколько заплатили? Сумма в гривнах, например 700`,
       );
     }
-
     if (st === 'tc_time') {
       const sd = { ...u.state_data, time: txt === '-' ? null : txt };
       await db.setState(u.id, 'tc_price', sd);
@@ -421,13 +407,11 @@ export function registerTeacher(bot) {
       }
       return ctx.reply('Цена урока в гривнах? Например 700\n(или «0», если бесплатно/абонемент)');
     }
-
     if (st === 'tc_price') {
       const price = Number(txt.replace(',', '.')) || 0;
       await saveLesson(ctx, price);
       return;
     }
-
     if (st === 'tc_setprice') {
       const price = Number(txt.replace(',', '.'));
       if (!(price >= 0)) return ctx.reply('Нужна сумма числом, например 700');
@@ -440,7 +424,6 @@ export function registerTeacher(bot) {
         reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home'),
       });
     }
-
     if (st === 'tc_packcount') {
       const count = parseInt(txt, 10);
       if (!(count > 0)) return ctx.reply('Нужно число уроков, например 10');
@@ -463,7 +446,6 @@ export function registerTeacher(bot) {
         `Теперь на балансе: ${(stud.package_left || 0) + count} уроков.`,
         { reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
     }
-
     if (st === 'tc_payamount') {
       const amount = Number(txt.replace(',', '.'));
       if (!(amount > 0)) return ctx.reply('Нужна сумма числом, например 700');
@@ -473,7 +455,6 @@ export function registerTeacher(bot) {
         .text('Другое', 'tc:pk:other');
       return ctx.reply('Что за оплата?', { reply_markup: kb });
     }
-
     return next();
   });
 
@@ -521,14 +502,12 @@ export function registerTeacher(bot) {
     const u = await db.ensureUser(ctx.from);
     const { student_id, amount } = u.state_data ?? {};
     if (!amount) { await ctx.answerCallbackQuery(); return; }
-
     // Абонемент — спрашиваем количество уроков перед сохранением
     if (kind === 'package') {
       await db.setState(u.id, 'tc_packcount', { student_id, amount });
       await ctx.answerCallbackQuery();
       return ctx.reply('Сколько уроков в абонементе? Напиши число, например 10');
     }
-
     const { data: stud } = await db.supabase
       .from('tc_students').select('name').eq('id', student_id).single();
     await db.supabase.from('tc_payments').insert({
@@ -555,18 +534,20 @@ export async function sendEveningReminder(bot) {
 
   const planned = (lessons ?? []).filter((l) => l.status === 'planned');
 
-   let txt = planned.length
-    ? `🌙 <b>Итоги дня</b>\n\nНе отмечены уроки:\n`
-    : `🌙 <b>Итоги дня</b>\n\nНа сегодня уроков не записано. Спокойной ночи! 🌷`;
+  let txt = planned.length
+    ? `🌙 <b>Вечерний итог</b>\n\nОтметь, как прошли уроки, и не забудь записать завтрашние:\n`
+    : `🌙 <b>Вечерний итог</b>\n\nНе забудь записать уроки за сегодня (кто был, кто нет) и запланировать завтрашние 📝`;
+
   const kb = new InlineKeyboard();
   for (const l of planned) {
     txt += `${l.lesson_time || '—'} · ${l.student_name}\n`;
     kb.text(`✅ ${l.student_name}`, `tc:done:${l.id}`).row();
   }
-  kb.text('📅 Открыть день', 'tc:today');
+  kb.text('➕ Записать урок', 'tc:new').row();
+  kb.text('📅 Сегодня', 'tc:today');
 
   await bot.api.sendMessage(ENV.OWNER_TG_ID, txt, {
     parse_mode: 'HTML',
-    reply_markup: planned.length ? kb : undefined,
+    reply_markup: kb,
   }).catch(() => {});
 }
