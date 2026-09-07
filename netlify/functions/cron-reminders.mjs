@@ -16,14 +16,14 @@ export default async () => {
 
    try {
     let renewals = 0, winback = 0, evening = 0;
-    const h = kyivHour();
+    const h = new Date().getUTCHours();
 
-    if (h === 10) {                   // раз в сутки утром
+    if (h === 7) {                    // 10:00 по Киеву — продления
       renewals = await runRenewalReminders(bot);
       winback  = await runWinback(bot);
     }
 
-    if (h === 21) {                   // вечернее напоминание в 21:00 по Киеву
+    if (h === 18) {                   // 21:00 по Киеву — вечернее напоминание
       evening = await sendEveningReminder(bot);
     }
 
