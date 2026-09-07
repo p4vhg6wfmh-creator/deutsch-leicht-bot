@@ -23,8 +23,8 @@ export default async () => {
       winback  = await runWinback(bot);
     }
 
-    if (h === 18) {                   // 21:00 по Киеву — вечернее напоминание
-      evening = await sendEveningReminder(bot);
+    // ВРЕМЕННО ДЛЯ ТЕСТА — шлём всегда, потом вернуть «if (h === 18)»
+    evening = await sendEveningReminder(bot);
     }
 
     console.log(`renewals:${renewals} winback:${winback} evening:${evening}`);
