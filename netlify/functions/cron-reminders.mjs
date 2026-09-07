@@ -1,4 +1,4 @@
-// Крон: продления и вечернее напоминание.
+// Крон: продления (10:00 Киев) и вечернее напоминание (21:00 Киев).
 import { getBot } from '../../src/bot.js';
 import { runRenewalReminders } from '../../src/groups.js';
 import { runWinback } from '../../src/practice.js';
@@ -11,13 +11,14 @@ export default async () => {
     let renewals = 0, winback = 0, evening = 0;
     const h = new Date().getUTCHours();
 
-    if (h === 7) {
+    if (h === 7) {                    // 10:00 по Киеву — продления
       renewals = await runRenewalReminders(bot);
       winback  = await runWinback(bot);
     }
 
-    // ВРЕМЕННО ДЛЯ ТЕСТА — шлём всегда, потом вернуть «if (h === 18)»
-    evening = await sendEveningReminder(bot);
+    if (h === 18) {                   // 21:00 по Киеву — вечернее напоминание
+      evening = await sendEveningReminder(bot);
+    }
 
     console.log(`renewals:${renewals} winback:${winback} evening:${evening}`);
     return new Response('ok', { status: 200 });
