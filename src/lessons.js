@@ -4,7 +4,6 @@ import { ENV } from './config.js';
 import { money, escapeHtml, screen, kbBackMain, kbPayMethods } from './ui.js';
 
 // Часовой пояс расписания берётся из настроек (lesson_tz).
-// В нём ты вводишь слоты, в нём же их видят ученики.
 let TZ = 'Europe/Berlin';
 async function loadTz() {
   const s = await db.getSettings();
@@ -31,7 +30,6 @@ function tzLabel() {
        : `(${TZ})`;
 }
 
-// Смещение зоны в минутах на конкретный момент — с учётом перехода на летнее время
 function tzOffsetMinutes(date, tz) {
   const p = new Intl.DateTimeFormat('en-US', {
     timeZone: tz, hour12: false,
@@ -42,12 +40,10 @@ function tzOffsetMinutes(date, tz) {
   return (asUtc - date.getTime()) / 60000;
 }
 
-// «27.07» + 16:10 по TZ → момент в UTC
 function localToUtc(dateStr, hour, minute) {
   const [d, m] = dateStr.split('.').map(Number);
   const now = new Date();
   let year = now.getFullYear();
-  // если дата уже прошла — значит имеется в виду следующий год
   if (new Date(year, m - 1, d, 23, 59) < now) year += 1;
 
   const wall = Date.UTC(year, m - 1, d, hour, minute);
@@ -57,7 +53,6 @@ function localToUtc(dateStr, hour, minute) {
   return new Date(wall - off * 60000);
 }
 
-// «16», «16:10», «16.10» → { hour, minute }
 function parseTimeToken(tok) {
   let m = /^(\d{1,2})$/.exec(tok);
   if (m) return { hour: +m[1], minute: 0 };
@@ -166,7 +161,6 @@ export async function deliverLesson(bot, order, tgId) {
   await loadTz();
   const s0 = await db.getSettings();
 
-  // Счёт без слота (выставлен вручную через /invoice) — просто подтверждаем
   if (!order.product_ref) {
     await bot.api.sendMessage(
       tgId,
@@ -261,71 +255,30 @@ export async function sendLessonReminders(bot) {
 
 // ---------------------------------------------------------------------
 export function registerLessons(bot) {
-  // --- Главный экран уроков: информация есть всегда --------------------
+  // --- Главный экран: запись к преподавателю под контролем Ангелины ------
   bot.callbackQuery('slots:days', async (ctx) => {
     await ctx.answerCallbackQuery();
-    await loadTz();
-
-    const s = await db.getSettings();
     const user = await db.ensureUser(ctx.from);
-    const slots = await freeSlots();
-    const mine = await creditsSummary(user.id);
+    await db.setState(user.id, 'slot_request', {});
 
-    let text =
+    const text =
       '🎓 <b>Индивидуальные уроки</b>\n\n' +
-      'Один на один — идём в твоём темпе и разбираем именно то, ' +
-      'что нужно тебе.\n\n' +
-      '<b>Разовое занятие</b>\n' +
-      `45 минут — ${money(s.price_single_45 || 12)}\n` +
-      `60 минут — ${money(s.price_single_60 || 14)}\n\n` +
-      `<b>Абонемент на ${s.pack_size || 10} занятий</b>\n` +
-      `45 минут — ${money(s.price_pack_45 || 114)}\n` +
-      `60 минут — ${money(s.price_pack_60 || 130)}\n\n` +
-      `Время указано ${tzLabel()}.\n\n` +
-      `<b>Отмена занятия</b>\n${s.cancel_policy ?? ''}`;
-
-    if (mine.length) {
-      const lines = mine.map((c) =>
-        `${c.duration} мин — осталось ${c.left}` + (c.expires ? ` (до ${c.expires})` : ''));
-      text += `\n\n🎟 <b>Твой абонемент</b>\n${lines.join('\n')}`;
-    }
+      'У Ангелины сейчас нет свободных мест для новых учеников. ' +
+      'Но занятия можно начать с одним из проверенных преподавателей команды — ' +
+      'все они работают под полным контролем Ангелины и по её методике.\n\n' +
+      'Напиши одним сообщением:\n' +
+      '• свой уровень немецкого\n' +
+      '• цель изучения\n' +
+      '• опыт — как давно и как учишь язык\n\n' +
+      'Ангелина подберёт преподавателя лично под тебя 🙌';
 
     const kb = new InlineKeyboard();
-
-    if (slots.length) {
-      const byDay = new Map();
-      for (const sl of slots) {
-        const k = dayKey(sl.starts_at);
-        if (!byDay.has(k)) byDay.set(k, []);
-        byDay.get(k).push(sl);
-      }
-      text += '\n\n<b>Свободное время:</b>';
-      for (const [key, list] of byDay) {
-        kb.text(`${fmtDay(list[0].starts_at)} · ${list.length} шт.`, `slday:${key}`).row();
-      }
-    } else {
-      text += '\n\n📭 Свободного времени сейчас нет — расписание обновляю раз в неделю. ' +
-              'Оставь заявку, и подберу время лично.';
-      kb.text('Оставить заявку на время', 'slots:req').row();
-    }
-
-    kb.text('🎟 Абонемент на 10 занятий', 'pack:show').row();
     kb.text('← Назад', 'menu:lessons');
 
     await screen(ctx, text, kb);
   });
 
-  // --- Заявка, когда слотов нет ------------------------------------------
-  bot.callbackQuery('slots:req', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const user = await db.ensureUser(ctx.from);
-    await db.setState(user.id, 'slot_request', {});
-    await ctx.reply(
-      'Напиши одним сообщением, когда тебе удобно заниматься — ' +
-      'дни недели и примерное время. Я подберу и вернусь с вариантами.',
-    );
-  });
-
+  // --- Приём ответа с уровнем/целью/опытом -------------------------------
   bot.on('message:text', async (ctx, next) => {
     if (ctx.chat.type !== 'private') return next();
     if (ctx.message.text?.startsWith('/')) return next();
@@ -334,12 +287,12 @@ export function registerLessons(bot) {
     if (user.state !== 'slot_request') return next();
 
     await db.clearState(user.id);
-    await ctx.reply('Спасибо! Посмотрю расписание и вернусь с вариантами 🙌',
+    await ctx.reply('Спасибо! Передала Ангелине — она подберёт преподавателя и вернётся к тебе 🙌',
       { reply_markup: kbBackMain() });
 
     await ctx.api.sendMessage(
       ENV.ADMIN_CHAT_ID,
-      `🗓 <b>Заявка на индивидуальные</b>\n\n` +
+      `🎓 <b>Заявка на индивидуальные (к преподавателю)</b>\n\n` +
       `От: ${escapeHtml(user.first_name ?? '')} ` +
       `${user.username ? '@' + user.username : `(id ${user.tg_id})`}\n\n` +
       escapeHtml(ctx.message.text.slice(0, 600)),
@@ -347,152 +300,8 @@ export function registerLessons(bot) {
     ).catch(() => {});
   });
 
-  // --- Время в выбранный день --------------------------------------------
-  bot.callbackQuery(/^slday:(.+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await loadTz();
-    const key = ctx.match[1];
-    const slots = (await freeSlots()).filter((s) => dayKey(s.starts_at) === key);
-
-    if (!slots.length) {
-      return ctx.reply('Это время уже разобрали. Выбери другой день.', {
-        reply_markup: new InlineKeyboard().text('← К расписанию', 'slots:days'),
-      });
-    }
-
-    const kb = new InlineKeyboard();
-    slots.forEach((s, i) => {
-      kb.text(`${fmtTime(s.starts_at)} · ${s.duration_min}м`, `slot:${s.id}`);
-      if (i % 2 === 1) kb.row();
-    });
-    kb.row().text('← К расписанию', 'slots:days');
-
-    await screen(ctx,
-      `<b>${fmtDay(slots[0].starts_at)}</b>\n\nВыбери время (${tzLabel()}):`, kb);
-  });
-
-  // --- Бронь --------------------------------------------------------------
-  bot.callbackQuery(/^slot:(.+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    await loadTz();
-    const slot = await getSlot(ctx.match[1]);
-    const user = await db.ensureUser(ctx.from);
-
-    if (!slot || slot.status !== 'free') {
-      return ctx.reply('Это время только что заняли 🙈 Выбери другое.', {
-        reply_markup: new InlineKeyboard().text('← К расписанию', 'slots:days'),
-      });
-    }
-
-    const s = await db.getSettings();
-    const duration = slot.duration_min || 60;
-
-    // Есть абонемент — списываем занятие
-    if ((await creditsLeft(user.id, duration)).length) {
-      const ok = await useOneCredit(user.id, duration);
-      if (ok) {
-        await db.supabase.from('slots')
-          .update({ status: 'paid', user_id: user.id }).eq('id', slot.id);
-
-        const left = (await creditsSummary(user.id))
-          .find((c) => c.duration === duration)?.left ?? 0;
-
-        await ctx.reply(
-          `Записала 🎉\n\n` +
-          `<b>${fmtDay(slot.starts_at)}, ${fmtTime(slot.starts_at)}</b> ${tzLabel()}\n` +
-          `Занятие ${duration} минут, списано с абонемента.\n` +
-          `Осталось занятий: <b>${left}</b>\n\n` +
-          `Напомню за сутки и за час.\n\n` +
-          `<b>Отмена занятия</b>\n${s.cancel_policy ?? ''}`,
-          { parse_mode: 'HTML', reply_markup: kbBackMain() },
-        );
-
-        const { data: teacher } = await db.supabase
-          .from('teachers').select('tg_id').eq('id', slot.teacher_id).maybeSingle();
-        if (teacher?.tg_id) {
-          await ctx.api.sendMessage(teacher.tg_id,
-            `📅 Запись по абонементу: ${fmtDay(slot.starts_at)}, ${fmtTime(slot.starts_at)}`)
-            .catch(() => {});
-        }
-        return;
-      }
-    }
-
-    const price = slot.price_eur ?? Number(s[`price_single_${duration}`] || 14);
-    const holdMin = Number(s.lesson_hold_minutes || 60);
-
-    const order = await db.createOrder(user, {
-      type: 'lesson', id: slot.id,
-      title: `Урок ${duration} мин · ${fmtDay(slot.starts_at)}, ${fmtTime(slot.starts_at)}`,
-      price_eur: price,
-    });
-
-    await db.supabase.from('slots').update({
-      status: 'held', user_id: user.id, order_id: order.id,
-      held_until: new Date(Date.now() + holdMin * 60000).toISOString(),
-    }).eq('id', slot.id).eq('status', 'free');
-
-    await ctx.reply(
-      `<b>${fmtDay(slot.starts_at)}, ${fmtTime(slot.starts_at)}</b> ${tzLabel()}\n` +
-      `Урок ${duration} минут · <b>${money(price)}</b>\n\n` +
-      `Время держу за тобой ${holdMin} минут. Выбери способ оплаты:`,
-      { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
-    );
-  });
-
-  // --- Абонемент -----------------------------------------------------------
-  bot.callbackQuery('pack:show', async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const s = await db.getSettings();
-    const size = Number(s.pack_size || 10);
-    const days = Number(s.pack_valid_days || 120);
-    const p45 = Number(s.price_pack_45 || 114);
-    const p60 = Number(s.price_pack_60 || 130);
-    const f45 = Number(s.price_single_45 || 12) * size;
-    const f60 = Number(s.price_single_60 || 14) * size;
-
-    const kb = new InlineKeyboard()
-      .text(`45 минут · ${money(p45)}`, 'pack:buy:45').row()
-      .text(`60 минут · ${money(p60)}`, 'pack:buy:60').row()
-      .text('← Назад', 'slots:days');
-
-    await screen(ctx,
-      `🎟 <b>Абонемент на ${size} занятий</b>\n\n` +
-      'Выгоднее разовых, и не нужно оплачивать каждый урок — ' +
-      'выбираешь время, занятие списывается само.\n\n' +
-      `<b>45 минут</b> — ${money(p45)} вместо ${money(f45)}` +
-      (f45 > p45 ? ` (экономия ${money(f45 - p45)})` : '') + '\n' +
-      `<b>60 минут</b> — ${money(p60)} вместо ${money(f60)}` +
-      (f60 > p60 ? ` (экономия ${money(f60 - p60)})` : '') + '\n\n' +
-      `Действует ${days} дней с момента покупки.\n\n` +
-      `<b>Отмена занятия</b>\n${s.cancel_policy ?? ''}`,
-      kb);
-  });
-
-  bot.callbackQuery(/^pack:buy:(45|60)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
-    const duration = Number(ctx.match[1]);
-    const s = await db.getSettings();
-    const size = Number(s.pack_size || 10);
-    const price = Number(s[`price_pack_${duration}`] || 130);
-    const user = await db.ensureUser(ctx.from);
-
-    const order = await db.createOrder(user, {
-      type: 'package', id: null,
-      title: `Абонемент ${size} занятий по ${duration} мин`,
-      price_eur: price,
-    });
-
-    await ctx.reply(
-      `<b>Абонемент: ${size} занятий по ${duration} минут</b>\n` +
-      `К оплате: <b>${money(price)}</b>\n\n` +
-      'Выбери способ оплаты:',
-      { parse_mode: 'HTML', reply_markup: kbPayMethods(order.id) },
-    );
-  });
-
   // -------------------------------------------------------------------
-  // АДМИНКА
+  // АДМИНКА (записи слотов, счета) — оставлено как было
   // -------------------------------------------------------------------
   async function addSlots(ctx, duration) {
     await loadTz();
@@ -577,10 +386,6 @@ export function registerLessons(bot) {
     );
   });
 
-  // Выставить счёт за индивидуальный урок вручную (когда время согласовано лично)
-  //   /invoice @username 14
-  //   /invoice @username 14 45   (45-минутный)
-  //   /invoice 123456789 12
   bot.command('invoice', async (ctx) => {
     if (!isOwner(ctx)) return;
     const parts = (ctx.match ?? '').trim().split(/\s+/).filter(Boolean);
@@ -601,7 +406,6 @@ export function registerLessons(bot) {
     const amount = Number(parts[1].replace(',', '.'));
     if (!(amount > 0)) return ctx.reply('Сумма должна быть числом. Пример: /invoice @anna 14');
 
-    // Находим пользователя
     let target = null;
     if (who.startsWith('@')) {
       const { data } = await db.supabase
@@ -625,7 +429,6 @@ export function registerLessons(bot) {
       price_eur: amount,
     });
 
-    // Шлём счёт клиенту
     try {
       await bot.api.sendMessage(
         target.tg_id,
@@ -647,8 +450,6 @@ export function registerLessons(bot) {
     );
   });
 
-  // Отправить реквизиты без счёта — когда сумма ещё не согласована
-  //   /pay @username
   bot.command('pay', async (ctx) => {
     if (!isOwner(ctx)) return;
     const who = (ctx.match ?? '').trim().split(/\s+/)[0];
@@ -684,7 +485,6 @@ export function registerLessons(bot) {
       title: 'Индивидуальный урок',
       price_eur: 0,
     });
-    // помечаем заказ как «сумма свободная»
     await db.supabase.from('orders')
       .update({ amount_flexible: true }).eq('id', order.id);
 
