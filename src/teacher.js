@@ -76,7 +76,8 @@ async function ensureStudent(name) {
 async function showCabinet(ctx) {
   const kb = new InlineKeyboard()
     .text('➕ Записать урок', 'tc:new').row()
-    .text('📅 Сегодня', 'tc:today').text('📖 Уроки', 'tc:lessons').row()
+    .text('📅 Сегодня', 'tc:today').text('📆 Завтра', 'tc:tomorrow').row()
+    .text('📖 Уроки', 'tc:lessons').row()
     .text('💰 Записать оплату', 'tc:pay').row()
     .text('📊 За месяц', 'tc:month').text('📈 За неделю', 'tc:week').row()
     .text('💵 Оплаты', 'tc:payments').text('👤 Ученики', 'tc:students');
@@ -153,10 +154,13 @@ export function registerTeacher(bot) {
     await ctx.reply('Напиши дату в формате ДД.ММ, например 25.12');
   });
 
-  // сохраняет выбранную дату в state и переходит к вопросу о времени
-  async function askTime(ctx, date) {
+  // сохраняет выбранную дату/ученика в state и переходит к вопросу о времени
+  async function askTime(ctx, date, studentId = null) {
     const u = await db.ensureUser(ctx.from);
-    await db.setState(u.id, 'tc_time', { ...u.state_data, date });
+    const base = studentId
+      ? { student_id: studentId }
+      : (u.state_data ?? {});
+    await db.setState(u.id, 'tc_time', { ...base, date });
     await ctx.reply(
       `Дата: ${fmtDate(date)}.\nВо сколько урок? Напиши, например 16:00\n(или «-», если без времени)`,
     );
@@ -200,33 +204,66 @@ export function registerTeacher(bot) {
   bot.callbackQuery('tc:today', async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     await ctx.answerCallbackQuery();
-    await sendToday(ctx);
+    await sendDay(ctx, today(), 'Сегодня');
   });
-  bot.command('today', (ctx) => { if (isOwner(ctx)) return sendToday(ctx); });
+  bot.command('today', (ctx) => { if (isOwner(ctx)) return sendDay(ctx, today(), 'Сегодня'); });
 
-  async function sendToday(ctx) {
-    const d = today();
+  bot.callbackQuery('tc:tomorrow', async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    await sendDay(ctx, tomorrow(), 'Завтра');
+  });
+
+  // Показывает уроки за конкретный день (сегодня или завтра)
+  async function sendDay(ctx, d, label) {
+    const isTomorrow = label === 'Завтра';
     const { data: lessons } = await db.supabase
       .from('tc_lessons').select('*').eq('lesson_date', d)
       .order('lesson_time', { ascending: true });
-    if (!lessons?.length) {
-      return ctx.reply('На сегодня уроков нет.', {
-        reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home'),
-      });
-    }
     const kb = new InlineKeyboard();
-    let txt = `📅 <b>Сегодня, ${fmtDate(d)}</b>\n\n`;
-    for (const l of lessons) {
-      txt += `${l.lesson_time || '—'} · ${l.student_name} · ${uah(l.price_uah)} · ${STATUS[l.status]}\n`;
-      if (l.status === 'planned') {
-        kb.text(`✅ ${l.student_name}`, `tc:done:${l.id}`)
-          .text(`❌`, `tc:cancel:${l.id}`)
-          .text(`🚫`, `tc:noshow:${l.id}`).row();
+    let txt = `📅 <b>${label}, ${fmtDate(d)}</b>\n\n`;
+    if (!lessons?.length) {
+      txt += 'Уроков пока нет.\n';
+    } else {
+      for (const l of lessons) {
+        const payMark = l.ask_payment ? ' 💳' : '';
+        txt += `${l.lesson_time || '—'} · ${l.student_name} · ${uah(l.price_uah)}${payMark} · ${STATUS[l.status]}\n`;
+        if (l.status === 'planned') {
+          kb.text(`✅ ${l.student_name}`, `tc:done:${l.id}`)
+            .text(`❌`, `tc:cancel:${l.id}`)
+            .text(`🚫`, `tc:noshow:${l.id}`).row();
+        }
       }
     }
+    // кнопка добавления урока на нужный день
+    kb.text(isTomorrow ? '➕ Урок на завтра' : '➕ Урок на сегодня',
+            isTomorrow ? 'tc:addfor:tomorrow' : 'tc:addfor:today').row();
     kb.text('← В кабинет', 'tc:home');
     await ctx.reply(txt, { parse_mode: 'HTML', reply_markup: kb });
   }
+
+  // Быстрое добавление урока с уже выбранным днём (минуем вопрос про дату)
+  bot.callbackQuery(/^tc:addfor:(today|tomorrow)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const day = ctx.match[1];                 // today | tomorrow
+    const list = await students();
+    const kb = new InlineKeyboard();
+    for (const s of list) kb.text(s.name, `tc:nlday:${day}:${s.id}`).row();
+    kb.text('➕ Новый ученик', 'tc:newstud').row();
+    kb.text('← Назад', day === 'tomorrow' ? 'tc:tomorrow' : 'tc:today');
+    const when = day === 'tomorrow' ? 'завтра' : 'сегодня';
+    await ctx.reply(`С кем урок ${when}? Выбери ученика.`, { reply_markup: kb });
+  });
+
+  // Выбрали ученика для конкретного дня → сразу к времени (дату уже знаем)
+  bot.callbackQuery(/^tc:nlday:(today|tomorrow):(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const day = ctx.match[1];
+    const date = day === 'tomorrow' ? tomorrow() : today();
+    await askTime(ctx, date, ctx.match[2]);
+  });
 
   // Отметки статуса
   for (const [act, st] of [['done','done'],['cancel','cancelled'],['noshow','noshow']]) {
@@ -251,7 +288,9 @@ export function registerTeacher(bot) {
         }
       }
       await ctx.answerCallbackQuery({ text: STATUS[st] + extra });
-      await sendToday(ctx);
+      // вернуться на тот день, к которому относится урок
+      if (les?.lesson_date === tomorrow()) await sendDay(ctx, tomorrow(), 'Завтра');
+      else await sendDay(ctx, today(), 'Сегодня');
     });
   }
 
@@ -630,9 +669,16 @@ export function registerTeacher(bot) {
         .update({ default_price_uah: price }).eq('id', student_id);
     }
     await db.clearState(u.id);
-    const kb = new InlineKeyboard()
-      .text('📅 Сегодня', 'tc:today').row()
-      .text('← В кабинет', 'tc:home');
+    const isTom = lessonDate === tomorrow();
+    const kb = new InlineKeyboard();
+    if (isTom) {
+      kb.text('➕ Ещё на завтра', 'tc:addfor:tomorrow').row()
+        .text('📆 Расписание на завтра', 'tc:tomorrow').row();
+    } else {
+      kb.text('➕ Ещё на сегодня', 'tc:addfor:today').row()
+        .text('📅 Сегодня', 'tc:today').row();
+    }
+    kb.text('← В кабинет', 'tc:home');
     const payNote = askPayment ? ' · 💳 попрошу оплату' : '';
     await ctx.reply(
       `Записала урок: ${stud.name} · ${fmtDate(lessonDate)}${time ? ' в ' + time : ''} · ${price} грн${payNote} ✅`,
