@@ -438,12 +438,79 @@ export function registerTeacher(bot) {
       const pack = s.package_left > 0 ? ` · 🎟 абонемент: ${s.package_left}` : '';
       const linked = s.tg_id ? ' · 🔗 привязан' : '';
       txt += `${s.name} — ${count ?? 0} уроков · ${price}${pack}${linked}\n`;
-      kb.text(`💵 ${s.name}`, `tc:setprice:${s.id}`)
+      kb.text(`📋 ${s.name}`, `tc:card:${s.id}`)
+        .text('💵', `tc:setprice:${s.id}`)
         .text(s.tg_id ? '🔗✅' : '🔗', `tc:link:${s.id}`).row();
     }
     kb.text('➕ Новый ученик', 'tc:newstud').row();
     kb.text('← В кабинет', 'tc:home');
     await ctx.reply(txt || 'Пока никого', { parse_mode: 'HTML', reply_markup: kb });
+  });
+
+  // ---------- КАРТОЧКА УЧЕНИКА (уроки + оплаты за 3 месяца) ----------
+  bot.callbackQuery(/^tc:card:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const id = ctx.match[1];
+
+    // дата «3 месяца назад»
+    const from = new Date();
+    from.setMonth(from.getMonth() - 3);
+    const fromStr = from.toISOString().slice(0, 10);
+
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('*').eq('id', id).single();
+    const { data: lessons } = await db.supabase
+      .from('tc_lessons').select('*')
+      .eq('student_id', id).gte('lesson_date', fromStr)
+      .order('lesson_date', { ascending: false }).order('lesson_time', { ascending: false });
+    const { data: pays } = await db.supabase
+      .from('tc_payments').select('*')
+      .eq('student_id', id).gte('pay_date', fromStr)
+      .order('pay_date', { ascending: false });
+
+    const ls = lessons ?? [];
+    const ps = pays ?? [];
+    const done = ls.filter((l) => l.status === 'done').length;
+    const missed = ls.filter((l) => l.status === 'cancelled' || l.status === 'noshow').length;
+    const paidSum = ps.reduce((a, p) => a + Number(p.amount_uah), 0);
+
+    const price = stud.default_price_uah
+      ? `${Number(stud.default_price_uah).toFixed(0)} грн` : 'не задана';
+    const pack = stud.package_left > 0 ? `\n🎟 Абонемент: осталось ${stud.package_left}` : '';
+    const linked = stud.tg_id ? '🔗 привязан' : '🔗 не привязан';
+
+    let txt = `📋 <b>${stud.name}</b>\n`;
+    txt += `${linked} · цена ${price}${pack}\n`;
+    txt += `\n<b>За 3 месяца:</b>\n`;
+    txt += `Проведено уроков: ${done} · пропущено/отменено: ${missed}\n`;
+    txt += `Всего внесено оплат: ${uah(paidSum)}\n`;
+
+    txt += `\n<b>📖 Уроки:</b>\n`;
+    if (!ls.length) {
+      txt += 'нет за этот период\n';
+    } else {
+      for (const l of ls) {
+        txt += `${fmtDate(l.lesson_date)} ${l.lesson_time || '—'} · ${uah(l.price_uah)} · ${STATUS[l.status]}\n`;
+      }
+    }
+
+    txt += `\n<b>💰 Оплаты:</b>\n`;
+    if (!ps.length) {
+      txt += 'нет за этот период\n';
+    } else {
+      const KIND = { single: 'разовая', package: 'абонемент', other: 'другое' };
+      for (const p of ps) {
+        txt += `${fmtDate(p.pay_date)} · ${uah(p.amount_uah)} · ${KIND[p.kind] || p.kind}\n`;
+      }
+    }
+
+    const kb = new InlineKeyboard()
+      .text('← К ученикам', 'tc:students')
+      .text('🏠 В кабинет', 'tc:home');
+    // Telegram лимит ~4096 символов — на всякий случай подрежем
+    if (txt.length > 3900) txt = txt.slice(0, 3900) + '\n…(список длинный, показана часть)';
+    await ctx.reply(txt, { parse_mode: 'HTML', reply_markup: kb });
   });
 
   // Изменить привычную цену ученика
