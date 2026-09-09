@@ -689,10 +689,20 @@ export function registerTeacher(bot) {
         .text('Другое', 'tc:pk:other');
       return ctx.reply('Что за оплата?', { reply_markup: kb });
     }
+    if (st === 'tc_rcptask') {
+      const { data: stud } = await db.supabase
+        .from('tc_students').select('name, tg_id').eq('id', u.state_data.student_id).single();
+      await db.clearState(u.id);
+      if (stud?.tg_id) {
+        await bot.api.sendMessage(stud.tg_id, `📩 По оплате: ${txt}`).catch(() => {});
+        return ctx.reply(`Отправила ${stud.name}: «${txt}» ✅`, {
+          reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+      }
+      return ctx.reply('Не смогла отправить — ученик не привязан.', {
+        reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+    }
     return next();
   });
-
-  // Быстрый выбор привычной цены → тоже спрашиваем про оплату
   bot.callbackQuery(/^tc:useprice:(\d+(?:\.\d+)?)$/, async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     await ctx.answerCallbackQuery();
@@ -777,6 +787,63 @@ export function registerTeacher(bot) {
       `Оплата записана: ${stud.name} · ${uah(amount)} ✅`,
       { reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') },
     );
+  });
+
+  // ---------- КВИТАНЦИЯ ОТ УЧЕНИКА (фото/файл) ----------
+  // Ловим фото/документ. Если отправитель — привязанный ученик и у него нет
+  // активного состояния покупки — пересылаем квитанцию владельцу на проверку.
+  bot.on(['message:photo', 'message:document'], async (ctx, next) => {
+    // владельца и админ-чат не трогаем
+    if (isOwner(ctx)) return next();
+    const u = await db.ensureUser(ctx.from);
+    if (u.state) return next();            // человек в каком-то сценарии (напр. покупка) — не мешаем
+
+    // это привязанный ученик?
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('id, name').eq('tg_id', ctx.from.id).maybeSingle();
+    if (!stud) return next();              // не наш ученик — пропускаем дальше
+
+    const fileId = ctx.message.document?.file_id ?? ctx.message.photo?.at(-1)?.file_id;
+    if (!fileId) return next();
+
+    // ответ ученику
+    await ctx.reply('Квитанция отправлена ✅ Спасибо! Проверю оплату и напишу.');
+
+    // отправляем владельцу саму квитанцию + кнопки
+    if (!ENV.OWNER_TG_ID) return;
+    const caption = `🧾 <b>Квитанция от ${stud.name}</b>\nПроверь оплату 👇`;
+    const kb = new InlineKeyboard()
+      .text('✅ Оплата пришла', `tc:rcpt:ok:${stud.id}`)
+      .text('✏️ Уточнить', `tc:rcpt:ask:${stud.id}`);
+    const opts = { caption, parse_mode: 'HTML', reply_markup: kb };
+    await bot.api.sendDocument(ENV.OWNER_TG_ID, fileId, opts).catch(async () => {
+      await bot.api.sendPhoto(ENV.OWNER_TG_ID, fileId, opts).catch(() => {});
+    });
+  });
+
+  // Владелец нажал «Оплата пришла» → сообщаем ученику
+  bot.callbackQuery(/^tc:rcpt:ok:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery({ text: 'Ученику отправлено «принято»' });
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('name, tg_id').eq('id', ctx.match[1]).single();
+    if (stud?.tg_id) {
+      await bot.api.sendMessage(stud.tg_id, 'Оплата получена, спасибо! 🙌').catch(() => {});
+    }
+    await ctx.reply(
+      `✅ ${stud.name}: подтвердила оплату.\nНе забудь записать оплату в кабинет (💰), если нужно.`,
+      { reply_markup: new InlineKeyboard().text('💰 Записать оплату', 'tc:pay')
+          .text('← В кабинет', 'tc:home') },
+    );
+  });
+
+  // Владелец нажал «Уточнить» → просим текст, отправим ученику
+  bot.callbackQuery(/^tc:rcpt:ask:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    const u = await db.ensureUser(ctx.from);
+    await db.setState(u.id, 'tc_rcptask', { student_id: ctx.match[1] });
+    await ctx.reply('Что написать ученику по квитанции? Напиши сообщение — я перешлю ему.');
   });
 }
 
