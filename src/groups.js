@@ -71,12 +71,11 @@ export async function memberships(userId) {
 function groupLine(g) {
   // Интенсив по грамматике — своя подпись
   if (g.level === 'A1-B1') {
-    return `🎯 Интенсив по грамматике А1–Б1`;
+    return `🎯 Интенсив по грамматике А1–Б1 · набор открыт`;
   }
 
-  // Обычная группа: уровень + расписание (без счётчика мест)
-  const when = g.schedule_text || g.start_note || '';
-  return `👥 Группа ${g.level}${when ? ' · ' + when : ''}`;
+  // Обычная группа: единообразно «набор открыт» (не тянем дату из базы)
+  return `👥 Группа ${g.level} · набор открыт`;
 }
 
 export async function showGroupList(ctx) {
@@ -96,7 +95,7 @@ export async function showGroupList(ctx) {
     kb.text(`⚪️ ${lvl} группа — лист ожидания`, `wl:${lvl}`).row();
   }
   kb.text('🎓 Индивидуальные уроки', 'slots:days').row();
-  kb.text('💬 Разговорный клуб', 'club:show').row();
+  kb.text('💬 Разговорный клуб · набор открыт', 'club:show').row();
   kb.text('✍️ Связаться со мной', 'menu:contact').row();
   kb.text('← В главное меню', 'menu:main');
 
