@@ -796,7 +796,10 @@ export function registerTeacher(bot) {
     // владельца и админ-чат не трогаем
     if (isOwner(ctx)) return next();
     const u = await db.ensureUser(ctx.from);
-    if (u.state) return next();            // человек в каком-то сценарии (напр. покупка) — не мешаем
+    // пропускаем дальше только если ученик прямо сейчас покупает минибук
+    // (его квитанцию обработает payment.js). Любые другие «зависшие»
+    // состояния квитанцию НЕ блокируют.
+    if (u.state === 'awaiting_receipt') return next();
 
     // это привязанный ученик?
     const { data: stud } = await db.supabase
