@@ -295,6 +295,31 @@ export function registerTeacher(bot) {
     });
   }
 
+    // ---------- 🔔 РУЧНОЕ НАПОМИНАНИЕ ОДНОМУ УЧЕНИКУ ----------
+  bot.callbackQuery(/^tc:remind:(.+)$/, async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    const { data: l } = await db.supabase
+      .from('tc_lessons').select('*').eq('id', ctx.match[1]).maybeSingle();
+    if (!l) return ctx.answerCallbackQuery({ text: 'Урок не найден' });
+    if (!l.student_id) return ctx.answerCallbackQuery({ text: 'Ученик не привязан' });
+
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('tg_id, name').eq('id', l.student_id).single();
+    if (!stud?.tg_id) {
+      return ctx.answerCallbackQuery({ text: `${l.student_name} не привязан(а) 🔗` });
+    }
+
+    const when = l.lesson_time ? `сегодня в ${l.lesson_time}` : 'сегодня';
+    let txt = `👋 Привет! Напоминаю: у тебя урок ${when}.`;
+    if (l.ask_payment) txt += `\n\n${PAY_DETAILS}`;
+
+    const ok = await bot.api.sendMessage(stud.tg_id, txt, { parse_mode: 'HTML' })
+      .then(() => true).catch(() => false);
+
+    await ctx.answerCallbackQuery({
+      text: ok ? `Напоминание отправлено ${stud.name} ✅` : 'Не удалось отправить',
+    });
+  });
   // ---------- ВСЕ УРОКИ (последние) ----------
   bot.callbackQuery('tc:lessons', async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
