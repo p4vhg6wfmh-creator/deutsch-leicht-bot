@@ -228,10 +228,11 @@ export function registerTeacher(bot) {
       for (const l of lessons) {
         const payMark = l.ask_payment ? ' 💳' : '';
         txt += `${l.lesson_time || '—'} · ${l.student_name} · ${uah(l.price_uah)}${payMark} · ${STATUS[l.status]}\n`;
-        if (l.status === 'planned') {
+             if (l.status === 'planned') {
           kb.text(`✅ ${l.student_name}`, `tc:done:${l.id}`)
             .text(`❌`, `tc:cancel:${l.id}`)
             .text(`🚫`, `tc:noshow:${l.id}`).row();
+          kb.text(`🔔 Напомнить ${l.student_name}`, `tc:remind:${l.id}`).row();
         }
       }
     }
