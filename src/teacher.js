@@ -228,7 +228,7 @@ export function registerTeacher(bot) {
       for (const l of lessons) {
         const payMark = l.ask_payment ? ' 💳' : '';
         txt += `${l.lesson_time || '—'} · ${l.student_name} · ${uah(l.price_uah)}${payMark} · ${STATUS[l.status]}\n`;
-             if (l.status === 'planned') {
+        if (l.status === 'planned') {
           kb.text(`✅ ${l.student_name}`, `tc:done:${l.id}`)
             .text(`❌`, `tc:cancel:${l.id}`)
             .text(`🚫`, `tc:noshow:${l.id}`).row();
@@ -295,7 +295,7 @@ export function registerTeacher(bot) {
     });
   }
 
-    // ---------- 🔔 РУЧНОЕ НАПОМИНАНИЕ ОДНОМУ УЧЕНИКУ ----------
+  // ---------- 🔔 РУЧНОЕ НАПОМИНАНИЕ ОДНОМУ УЧЕНИКУ ----------
   bot.callbackQuery(/^tc:remind:(.+)$/, async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     const { data: l } = await db.supabase
@@ -309,7 +309,10 @@ export function registerTeacher(bot) {
       return ctx.answerCallbackQuery({ text: `${l.student_name} не привязан(а) 🔗` });
     }
 
-    const when = l.lesson_time ? `сегодня в ${l.lesson_time}` : 'сегодня';
+    const dayWord = l.lesson_date === tomorrow() ? 'завтра'
+                  : l.lesson_date === today() ? 'сегодня'
+                  : fmtDate(l.lesson_date);
+    const when = l.lesson_time ? `${dayWord} в ${l.lesson_time}` : dayWord;
     let txt = `👋 Привет! Напоминаю: у тебя урок ${when}.`;
     if (l.ask_payment) txt += `\n\n${PAY_DETAILS}`;
 
@@ -320,6 +323,7 @@ export function registerTeacher(bot) {
       text: ok ? `Напоминание отправлено ${stud.name} ✅` : 'Не удалось отправить',
     });
   });
+
   // ---------- ВСЕ УРОКИ (последние) ----------
   bot.callbackQuery('tc:lessons', async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
@@ -920,6 +924,12 @@ export async function sendMorningReminders(bot) {
   let sent = 0;
   for (const l of lessons) {
     if (!l.student_id) continue;
+
+    // ранние уроки (до 12:00) уже напомнили вчера вечером — пропускаем,
+    // чтобы не отправить дважды
+    const hour = l.lesson_time ? parseInt(l.lesson_time.slice(0, 2), 10) : null;
+    if (hour !== null && hour < 12) continue;
+
     // берём Telegram ученика
     const { data: stud } = await db.supabase
       .from('tc_students').select('tg_id, name').eq('id', l.student_id).single();
@@ -932,6 +942,41 @@ export async function sendMorningReminders(bot) {
     if (l.ask_payment) {
       txt += `\n\n${PAY_DETAILS}`;
     }
+
+    const ok = await bot.api.sendMessage(stud.tg_id, txt, { parse_mode: 'HTML' })
+      .then(() => true).catch(() => false);
+    if (ok) sent++;
+  }
+  return sent;
+}
+
+// ---------------------------------------------------------------------
+// Вечернее напоминание УЧЕНИКАМ (вызывается кроном в 22:00 Киев)
+// Шлём по ЗАВТРАШНИМ урокам, которые начинаются РАНЬШЕ 12:00 —
+// их дневная рассылка (12:00) не успеет напомнить вовремя.
+// ---------------------------------------------------------------------
+export async function sendTomorrowReminders(bot) {
+  const d = tomorrow();
+  const { data: lessons } = await db.supabase
+    .from('tc_lessons').select('*')
+    .eq('lesson_date', d).eq('status', 'planned');
+
+  if (!lessons?.length) return 0;
+
+  let sent = 0;
+  for (const l of lessons) {
+    if (!l.student_id) continue;
+
+    // только ранние уроки: время есть и оно строго раньше 12:00
+    const hour = l.lesson_time ? parseInt(l.lesson_time.slice(0, 2), 10) : null;
+    if (hour === null || hour >= 12) continue;
+
+    const { data: stud } = await db.supabase
+      .from('tc_students').select('tg_id, name').eq('id', l.student_id).single();
+    if (!stud?.tg_id) continue;
+
+    let txt = `👋 Привет! Напоминаю: завтра у тебя урок в ${l.lesson_time}.`;
+    if (l.ask_payment) txt += `\n\n${PAY_DETAILS}`;
 
     const ok = await bot.api.sendMessage(stud.tg_id, txt, { parse_mode: 'HTML' })
       .then(() => true).catch(() => false);
