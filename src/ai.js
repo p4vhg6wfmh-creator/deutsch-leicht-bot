@@ -3,6 +3,8 @@
 
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 const RULES = `Ты разбираешь сообщения учителя немецкого для её кабинета учёта.
 Учитель пишет по-русски (иногда по-украински) свободным текстом.
 Верни ТОЛЬКО JSON такого вида: {"actions":[...],"say":""}
@@ -48,58 +50,67 @@ export async function parseMessage(text, { students, today, weekday }) {
     generationConfig: { responseMimeType: 'application/json', temperature: 0 },
   });
 
-  // Если основная модель перегружена (503) или упёрлась в лимит — пробуем запасную.
-  // Время на ответ ограничено (всего бот может работать до ~30 секунд).
-  const attempts = [
-    [MODEL, 10000],
-    ['gemini-3.6-flash', 7000],
-    ['gemini-3.5-flash-lite', 6000],
-    ['gemini-3.1-flash-lite', 5000],
-  ];
+  // Бесплатные модели иногда отвечают «высокая нагрузка» (503). Тогда пробуем
+  // следующую модель, а если перегружены все — делаем ещё круг через пару секунд.
+  const models = [MODEL, 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+  const deadline = Date.now() + 26000; // бот ждёт до 30 секунд, берём с запасом
   let last = { error: 'fail' };
 
-  for (const [model, timeoutMs] of attempts) {
-    let res;
-    try {
-      res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body,
-          signal: AbortSignal.timeout(timeoutMs),
-        },
-      );
-    } catch (e) {
-      console.error('GEMINI network', model, e?.message);
-      last = { error: 'fail', detail: `${model}: нет ответа (${e?.message})` };
-      continue;
+  for (let round = 0; round < 3; round++) {
+    let retryable = false;
+
+    for (const model of models) {
+      const left = deadline - Date.now();
+      if (left < 1500) return last;
+
+      let res;
+      try {
+        res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+            body,
+            signal: AbortSignal.timeout(Math.min(10000, left)),
+          },
+        );
+      } catch (e) {
+        console.error('GEMINI network', model, e?.message);
+        last = { error: 'fail', detail: `${model}: нет ответа (${e?.message})` };
+        retryable = true;
+        continue;
+      }
+
+      if (res.status === 429) { last = { error: 'limit' }; retryable = true; continue; }
+      if (!res.ok) {
+        const msg = (await res.text()).slice(0, 200);
+        console.error('GEMINI', model, res.status, msg);
+        last = { error: 'fail', detail: `${model}: ${res.status} ${msg}` };
+        // проблема с ключом или запросом — другая модель не поможет
+        if (res.status === 400 || res.status === 401 || res.status === 403) return last;
+        if (res.status !== 404) retryable = true;
+        continue;
+      }
+
+      try {
+        const data = await res.json();
+        const raw = (data.candidates?.[0]?.content?.parts ?? [])
+          .map((p) => p.text ?? '').join('')
+          .replace(/^```(?:json)?\s*|\s*```$/g, '');
+        const parsed = JSON.parse(raw);
+        return {
+          actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+          say: typeof parsed.say === 'string' ? parsed.say : '',
+        };
+      } catch (e) {
+        console.error('GEMINI parse', model, e?.message);
+        last = { error: 'fail', detail: `${model}: ответ не разобрать (${e?.message})` };
+        retryable = true;
+      }
     }
 
-    if (res.status === 429) { last = { error: 'limit' }; continue; }
-    if (!res.ok) {
-      const msg = (await res.text()).slice(0, 200);
-      console.error('GEMINI', model, res.status, msg);
-      last = { error: 'fail', detail: `${model}: ${res.status} ${msg}` };
-      // проблема с ключом или запросом — другая модель не поможет
-      if (res.status === 400 || res.status === 401 || res.status === 403) break;
-      continue;
-    }
-
-    try {
-      const data = await res.json();
-      const raw = (data.candidates?.[0]?.content?.parts ?? [])
-        .map((p) => p.text ?? '').join('')
-        .replace(/^```(?:json)?\s*|\s*```$/g, '');
-      const parsed = JSON.parse(raw);
-      return {
-        actions: Array.isArray(parsed.actions) ? parsed.actions : [],
-        say: typeof parsed.say === 'string' ? parsed.say : '',
-      };
-    } catch (e) {
-      console.error('GEMINI parse', model, e?.message);
-      last = { error: 'fail', detail: `${model}: ответ не разобрать (${e?.message})` };
-    }
+    if (!retryable || deadline - Date.now() < 4000) break;
+    await sleep(2000);
   }
   return last;
 }
