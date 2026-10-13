@@ -1037,12 +1037,11 @@ export function registerTeacher(bot) {
       case 'reset_package': {
         if (!name) return needName();
         const stud = await findStudent(name);
-        if (!stud) return warn(`Не нашла ученика «${name}».`);
         const n = Number(a.lessons) >= 0 ? Math.round(Number(a.lessons)) : 0;
         return {
           ok: true,
-          a: { type: 'reset_package', student: stud.name, lessons: n },
-          line: `🔄 Абонемент ${stud.name}: было ${stud.package_left || 0} → станет ${n} уроков`,
+          a: { type: 'reset_package', student: stud?.name ?? name, lessons: n },
+          line: `🔄 Абонемент ${stud ? stud.name : `${name} (новый ученик)`}: было ${stud?.package_left || 0} → станет ${n} уроков`,
         };
       }
 
@@ -1115,13 +1114,10 @@ export function registerTeacher(bot) {
         return `🗑 Удалила оплату: ${a.student}`;
 
       case 'reset_package': {
-        const { data: s } = await db.supabase
-          .from('tc_students').select('id').ilike('name', a.student).limit(1);
-        if (!s?.[0]) return `⚠️ Не нашла ученика ${a.student}.`;
-        const patch = { package_left: a.lessons };
-        if (a.lessons > 0) patch.package_total = a.lessons;
-        await db.supabase.from('tc_students').update(patch).eq('id', s[0].id);
-        return `🔄 Абонемент ${a.student}: теперь ${a.lessons} уроков`;
+        const stud = await ensureStudent(a.student);
+        await db.supabase.from('tc_students')
+          .update({ package_left: a.lessons }).eq('id', stud.id);
+        return `🔄 Абонемент ${stud.name}: теперь ${a.lessons} уроков`;
       }
 
       default:
