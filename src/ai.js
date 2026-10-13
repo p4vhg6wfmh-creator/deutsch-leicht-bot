@@ -2,7 +2,6 @@
 // Ничего не знает про базу данных: только превращает текст в список команд.
 
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
-const URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
 const RULES = `Ты разбираешь сообщения учителя немецкого для её кабинета учёта.
 Учитель пишет по-русски (иногда по-украински) свободным текстом.
@@ -29,11 +28,13 @@ const RULES = `Ты разбираешь сообщения учителя не�
 - «обнуляем абонемент / считаем заново / сбрось абонемент»: reset_package, lessons 0 (или то число, которое назвали).
 - Массовые просьбы («удали всё», «сбрось все данные», «очисти базу») НЕ выполняй: верни none и в "say" объясни, что можно сбросить абонемент или удалить запись одного ученика.
 - Все суммы в гривнах.`;
+
 export async function parseMessage(text, { students, today, weekday }) {
-  const key = process.env.GEMINI_API_KEY;
+  // убираем случайные пробелы и кавычки, которые попадают при копировании
+  const key = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']+|["']+$/g, '');
   if (!key) return { error: 'no_key' };
 
-  const body = {
+  const body = JSON.stringify({
     systemInstruction: { parts: [{ text: RULES }] },
     contents: [{
       role: 'user',
@@ -45,40 +46,58 @@ export async function parseMessage(text, { students, today, weekday }) {
       }],
     }],
     generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-  };
+  });
 
-  let res;
-  try {
-    res = await fetch(URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(9000),
-    });
-  } catch (e) {
-    console.error('GEMINI network', e?.message);
-    return { error: 'fail', detail: `сеть: ${e?.message}` };
-  }
+  // Если основная модель перегружена (503) или упёрлась в лимит — пробуем запасную.
+  // Время на ответ ограничено (бот должен успеть ответить Telegram за ~8 секунд).
+  const attempts = [
+    [MODEL, 4500],
+    ['gemini-3.5-flash-lite', 3000],
+  ];
+  let last = { error: 'fail' };
 
-  if (res.status === 429) return { error: 'limit' };
-  if (!res.ok) {
-    const msg = (await res.text()).slice(0, 300);
-    console.error('GEMINI', res.status, msg);
-    return { error: 'fail', detail: `${res.status} ${msg}` };
-  }
+  for (const [model, timeoutMs] of attempts) {
+    let res;
+    try {
+      res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+          body,
+          signal: AbortSignal.timeout(timeoutMs),
+        },
+      );
+    } catch (e) {
+      console.error('GEMINI network', model, e?.message);
+      last = { error: 'fail', detail: `${model}: нет ответа (${e?.message})` };
+      continue;
+    }
 
-  try {
-    const data = await res.json();
-    const raw = (data.candidates?.[0]?.content?.parts ?? [])
-      .map((p) => p.text ?? '').join('')
-      .replace(/^```(?:json)?\s*|\s*```$/g, '');
-    const parsed = JSON.parse(raw);
-    return {
-      actions: Array.isArray(parsed.actions) ? parsed.actions : [],
-      say: typeof parsed.say === 'string' ? parsed.say : '',
-    };
-  } catch (e) {
-    console.error('GEMINI parse', e?.message);
-    return { error: 'fail', detail: `ответ не разобрать: ${e?.message}` };
+    if (res.status === 429) { last = { error: 'limit' }; continue; }
+    if (!res.ok) {
+      const msg = (await res.text()).slice(0, 200);
+      console.error('GEMINI', model, res.status, msg);
+      last = { error: 'fail', detail: `${model}: ${res.status} ${msg}` };
+      // проблема с ключом или запросом — другая модель не поможет
+      if (res.status === 400 || res.status === 401 || res.status === 403) break;
+      continue;
+    }
+
+    try {
+      const data = await res.json();
+      const raw = (data.candidates?.[0]?.content?.parts ?? [])
+        .map((p) => p.text ?? '').join('')
+        .replace(/^```(?:json)?\s*|\s*```$/g, '');
+      const parsed = JSON.parse(raw);
+      return {
+        actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+        say: typeof parsed.say === 'string' ? parsed.say : '',
+      };
+    } catch (e) {
+      console.error('GEMINI parse', model, e?.message);
+      last = { error: 'fail', detail: `${model}: ответ не разобрать (${e?.message})` };
+    }
   }
+  return last;
 }
