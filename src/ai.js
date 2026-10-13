@@ -51,8 +51,10 @@ export async function parseMessage(text, { students, today, weekday }) {
   // Если основная модель перегружена (503) или упёрлась в лимит — пробуем запасную.
   // Время на ответ ограничено (всего бот может работать до ~30 секунд).
   const attempts = [
-    [MODEL, 14000],
-    ['gemini-3.5-flash-lite', 9000],
+    [MODEL, 10000],
+    ['gemini-3.6-flash', 7000],
+    ['gemini-3.5-flash-lite', 6000],
+    ['gemini-3.1-flash-lite', 5000],
   ];
   let last = { error: 'fail' };
 
