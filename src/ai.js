@@ -29,7 +29,6 @@ const RULES = `Ты разбираешь сообщения учителя не�
 - «обнуляем абонемент / считаем заново / сбрось абонемент»: reset_package, lessons 0 (или то число, которое назвали).
 - Массовые просьбы («удали всё», «сбрось все данные», «очисти базу») НЕ выполняй: верни none и в "say" объясни, что можно сбросить абонемент или удалить запись одного ученика.
 - Все суммы в гривнах.`;
-
 export async function parseMessage(text, { students, today, weekday }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return { error: 'no_key' };
