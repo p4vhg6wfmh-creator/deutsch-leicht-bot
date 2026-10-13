@@ -49,10 +49,10 @@ export async function parseMessage(text, { students, today, weekday }) {
   });
 
   // Если основная модель перегружена (503) или упёрлась в лимит — пробуем запасную.
-  // Время на ответ ограничено (бот должен успеть ответить Telegram за ~8 секунд).
+  // Время на ответ ограничено (всего бот может работать до ~30 секунд).
   const attempts = [
-    [MODEL, 4500],
-    ['gemini-3.5-flash-lite', 3000],
+    [MODEL, 14000],
+    ['gemini-3.5-flash-lite', 9000],
   ];
   let last = { error: 'fail' };
 
