@@ -57,14 +57,16 @@ export async function parseMessage(text, { students, today, weekday }) {
       signal: AbortSignal.timeout(9000),
     });
   } catch (e) {
-    console.error('GEMINI network', e?.message);
-    return { error: 'fail' };
+    console.error('GEMINI parse', e?.message);
+    return { error: 'fail', detail: `ответ не разобрать: ${e?.message}` };
   }
 
   if (res.status === 429) return { error: 'limit' };
   if (!res.ok) {
-    console.error('GEMINI', res.status, (await res.text()).slice(0, 300));
-    return { error: 'fail' };
+    const msg = (await res.text()).slice(0, 300);
+    console.error('GEMINI', res.status, msg);
+    return { error: 'fail', detail: `${res.status} ${msg}` };
+  }
   }
 
   try {
@@ -78,7 +80,7 @@ export async function parseMessage(text, { students, today, weekday }) {
       say: typeof parsed.say === 'string' ? parsed.say : '',
     };
   } catch (e) {
-    console.error('GEMINI parse', e?.message);
-    return { error: 'fail' };
+    console.error('GEMINI network', e?.message);
+    return { error: 'fail', detail: `сеть: ${e?.message}` };
   }
 }
