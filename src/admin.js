@@ -1,302 +1,206 @@
-/**
- * admin.js — личный кабинет учителя
- *
- * Команды (только для владельца):
- *   /today       — уроки сегодня с кнопками ✓ / ✕
- *   /unpaid      — кто ещё не оплатил (ожидающие заказы)
- *   /pay <имя> <сумма> — быстро записать оплату наличными/переводом
- */
+// src/ai.js — связь с Gemini.
+// Ничего не знает про базу данных: только превращает текст в список команд.
 
-import { InlineKeyboard } from 'grammy';
-import * as db from './db.js';
-import { ENV } from './config.js';
+const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
-const TZ = 'Europe/Berlin';
+// Порядок = приоритет. Если модель молчит дольше HEDGE_MS или отвечает ошибкой,
+// параллельно запускается следующая; берём ответ той, что справилась первой.
+const MODELS = [...new Set(['gemini-3.6-flash', MODEL, 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'])];
+const HEDGE_MS = 4000;      // через сколько мс без ответа подключать следующую модель
+const DEADLINE_MS = 26000;  // дольше не ждём (Telegram ждёт ответ бота до ~30 секунд)
+const GAP_FAST_MS = 300;    // пауза перед следующей моделью после быстрой ошибки
+const GAP_SLOW_MS = 2500;   // то же на втором круге (когда все модели уже были с ошибкой)
 
-function isOwner(ctx) {
-  return !ENV.OWNER_TG_ID || String(ctx.from?.id) === String(ENV.OWNER_TG_ID);
-}
+// Насколько «думать»: чем меньше, тем быстрее ответ. Для разбора текста хватает минимума.
+const LEVEL = {
+  'gemini-3.6-flash': 'minimal',
+  'gemini-3.5-flash-lite': 'minimal',
+  'gemini-3.1-flash-lite': 'minimal',
+};
+// Модели, которым не подошла эта настройка — для них шлём запрос без неё.
+const noThinking = new Set();
 
-// Форматирование времени в часовом поясе TZ
-function fmtTime(iso) {
-  return new Intl.DateTimeFormat('ru-RU', {
-    timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date(iso));
-}
+const RULES = `Ты разбираешь сообщения учителя немецкого для её кабинета учёта.
+Учитель пишет по-русски (иногда по-украински) свободным текстом.
+Верни ТОЛЬКО JSON такого вида: {"actions":[...],"say":""}
 
-// Сегодняшняя дата в TZ в формате YYYY-MM-DD
-function todayInTz() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
-}
+Допустимые команды (поле "type"):
+- add_lesson: student, date (YYYY-MM-DD), time ("HH:MM" или null), status ("planned"|"done"|"cancelled"|"noshow"), price (число в гривнах или null)
+- set_status: student, date (YYYY-MM-DD), status ("done"|"cancelled"|"noshow")
+- add_payment: student, amount (число в гривнах или null, если сумма не названа), kind ("single"|"package"|"other"), lessons (число уроков для package или null, если не названо)
+- delete_lesson: student, date (YYYY-MM-DD)
+- delete_last_payment: student
+- reset_package: student, lessons (сколько уроков поставить на баланс; 0 = просто обнулить)
+- report: period ("today"|"week"|"month")
+- none: если сообщение не про учёт или не хватает данных. Тогда в "say" короткий вопрос или ответ.
 
-// Завтрашняя дата в TZ
-function tomorrowInTz() {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(d);
-}
+Правила:
+- В одном сообщении может быть несколько действий. Верни их все по порядку.
+- student: имя ТОЧНО как в списке учеников, если оно похоже (падежи: «Ани» = «Аня»). Если в списке нет, пиши имя из сообщения в именительном падеже.
+- Ничего не придумывай. Если не хватает даты или непонятно, о ком речь, верни none и спроси в "say".
+- «провела / был урок / позанимались» = done. «не пришёл / не явился» = noshow. «отменили / отмена / перенесли» = cancelled. «запиши / будет / назначь» = planned.
+- «завтра будет Имя» = add_lesson, status "planned", дата завтрашняя, time и price null, если не названы.
+- Дата: «сегодня» = сегодняшняя, «вчера», «завтра». День недели без даты: для прошедшего урока — ближайший такой день в прошлом (сегодня тоже подходит), для «запиши / будет» — ближайший в будущем.
+- «оплатил занятие» без суммы: add_payment, kind "single", amount null.
+- «оплатил абонемент»: add_payment, kind "package".
+- Абонемент по умолчанию = 10 занятий. Если сказано, что абонемент оплачен раньше и с тех пор прошло N занятий — верни reset_package с lessons = 10 − N (или от того числа занятий, которое назвали). Новую оплату в этом случае НЕ добавляй, если сумма не названа.
+- «обнуляем абонемент / считаем заново / сбрось абонемент»: reset_package, lessons 0 (или то число, которое назвали).
+- Массовые просьбы («удали всё», «сбрось все данные», «очисти базу») НЕ выполняй: верни none и в "say" объясни, что можно сбросить абонемент или удалить запись одного ученика.
+- Все суммы в гривнах.`;
 
-// Получить уроки на сегодня (оплаченные и запланированные слоты)
-async function todaySlots() {
-  const today = todayInTz();
-  const tomorrow = tomorrowInTz();
+export async function parseMessage(text, { students, today, weekday }) {
+  // убираем случайные пробелы и кавычки, которые попадают при копировании
+  const key = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']+|["']+$/g, '');
+  if (!key) return { error: 'no_key' };
 
-  const { data } = await db.supabase
-    .from('slots')
-    .select('*, users(first_name, username, tg_id)')
-    .in('status', ['paid', 'done', 'cancelled'])
-    .gte('starts_at', `${today}T00:00:00Z`)
-    .lt('starts_at', `${tomorrow}T00:00:00Z`)
-    .order('starts_at', { ascending: true });
+  const t0 = Date.now();
+  const deadline = t0 + DEADLINE_MS;
+  const controllers = new Set(); // чтобы оборвать лишние запросы, когда ответ уже есть
+  const events = [];             // журнал для строки «для отладки»: что и когда происходило
+  const sec = () => `${((Date.now() - t0) / 1000).toFixed(1)}с`;
 
-  return data ?? [];
-}
+  const makeBody = (model, withThinking) => JSON.stringify({
+    systemInstruction: { parts: [{ text: RULES }] },
+    contents: [{
+      role: 'user',
+      parts: [{
+        text:
+          `Сегодня: ${today} (${weekday}).\n` +
+          `Ученики: ${students.length ? students.join(', ') : 'пока нет'}.\n\n` +
+          `Сообщение:\n${text}`,
+      }],
+    }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0,
+      ...(withThinking ? { thinkingConfig: { thinkingLevel: LEVEL[model] || 'low' } } : {}),
+    },
+  });
 
-// Получить ожидающие подтверждения заказы
-async function pendingOrders() {
-  const { data } = await db.supabase
-    .from('orders')
-    .select('*, users(first_name, username, tg_id)')
-    .eq('status', 'awaiting')
-    .order('created_at', { ascending: true });
-  return data ?? [];
-}
+  // Один запрос к одной модели. Возвращает { value } или { err, fatal }.
+  const call = async (model) => {
+    const c = new AbortController();
+    controllers.add(c);
+    const timer = setTimeout(() => c.abort(), Math.max(500, deadline - Date.now()));
+    const send = (withThinking) => fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: makeBody(model, withThinking),
+        signal: c.signal,
+      },
+    );
+    try {
+      let res = await send(!noThinking.has(model));
 
-// Имя ученика из слота
-function studentName(slot) {
-  if (!slot.users) return 'Неизвестный';
-  const u = slot.users;
-  return u.first_name || u.username || `id${u.tg_id}`;
-}
-
-// Статус слота в виде эмодзи
-function statusIcon(status) {
-  if (status === 'done') return '✅';
-  if (status === 'cancelled') return '❌';
-  return '📅'; // paid / planned
-}
-
-// ---------------------------------------------------------------------
-export function registerAdmin(bot) {
-
-  // -------------------------------------------------------------------
-  // /today — уроки на сегодня
-  // -------------------------------------------------------------------
-  bot.command('today', async (ctx) => {
-    if (!isOwner(ctx)) return;
-
-    const slots = await todaySlots();
-
-    if (!slots.length) {
-      await ctx.reply('📭 Уроков на сегодня нет.');
-      return;
-    }
-
-    const today = new Intl.DateTimeFormat('ru-RU', {
-      timeZone: TZ, day: 'numeric', month: 'long', weekday: 'long',
-    }).format(new Date());
-
-    let text = `📅 <b>Уроки на ${today}</b>\n\n`;
-
-    const kb = new InlineKeyboard();
-    let hasPending = false;
-
-    for (const slot of slots) {
-      const time = fmtTime(slot.starts_at);
-      const name = studentName(slot);
-      const icon = statusIcon(slot.status);
-      const dur = slot.duration_min ? ` · ${slot.duration_min} мин` : '';
-
-      text += `${icon} <b>${time}</b>${dur} — ${name}\n`;
-
-      if (slot.status === 'paid') {
-        hasPending = true;
-        kb.text(`✅ ${time} ${name}`, `adm:done:${slot.id}`)
-          .text(`❌ отмена`, `adm:cancel:${slot.id}`)
-          .row();
+      // Модель не приняла настройку обдумывания (400, но не из-за ключа) —
+      // повторяем без неё и запоминаем это для модели.
+      if (res.status === 400 && !noThinking.has(model)) {
+        const msg = await res.clone().text();
+        if (!/API_KEY_INVALID|API key/i.test(msg)) {
+          noThinking.add(model);
+          res = await send(false);
+        }
       }
-    }
 
-    if (!hasPending) {
-      text += '\n<i>Все уроки уже отмечены.</i>';
-      await ctx.reply(text, { parse_mode: 'HTML' });
-    } else {
-      text += '\n<i>Отметь проведённые уроки:</i>';
-      await ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+      if (res.status === 429) return { err: { error: 'limit' } };
+      if (!res.ok) {
+        const msg = (await res.text()).slice(0, 200);
+        console.error('GEMINI', model, res.status, msg);
+        return {
+          err: { error: 'fail', detail: `${model}: ${res.status} ${msg}` },
+          // проблема с ключом или запросом — другая модель не поможет
+          fatal: [400, 401, 403].includes(res.status),
+        };
+      }
+
+      const data = await res.json();
+      const raw = (data.candidates?.[0]?.content?.parts ?? [])
+        .map((p) => p.text ?? '').join('')
+        .replace(/^```(?:json)?\s*|\s*```$/g, '');
+      const parsed = JSON.parse(raw);
+      return {
+        value: {
+          actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+          say: typeof parsed.say === 'string' ? parsed.say : '',
+        },
+      };
+    } catch (e) {
+      const why = c.signal.aborted ? 'нет ответа вовремя'
+        : e instanceof SyntaxError ? 'ответ не разобрать'
+        : e?.message;
+      console.error('GEMINI', model, why);
+      return { err: { error: 'fail', detail: `${model}: ${why}` } };
+    } finally {
+      clearTimeout(timer);
+      controllers.delete(c);
     }
+  };
+
+  // То же, но с записью в журнал.
+  const run = async (model) => {
+    const tag = model.replace('gemini-', '');
+    events.push(`${sec()} ▶${tag}`);
+    const r = await call(model);
+    if (!r.value) {
+      const why = String(r.err.detail ?? r.err.error).replace(`${model}: `, '').replace(/\s+/g, ' ').slice(0, 45);
+      events.push(`${sec()} ✖${tag}: ${why}`);
+    }
+    return r;
+  };
+
+  // Запускаем модели по очереди с «подстраховкой»: следующая стартует, если предыдущая
+  // слишком долго молчит или уже ответила ошибкой. Побеждает первая удачная.
+  const order = [...MODELS, ...MODELS];
+  return new Promise((resolve) => {
+    let next = 0;
+    let running = 0;
+    let finished = false;
+    let last = { error: 'fail' };
+    let hedgeTimer = null;
+    let gapTimer = null;
+    let deadTimer = null;
+
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(hedgeTimer);
+      clearTimeout(gapTimer);
+      clearTimeout(deadTimer);
+      for (const c of controllers) c.abort();
+      // при ошибке прикладываем журнал, чтобы было видно, какая модель что ответила
+      resolve(result.error && result.error !== 'limit'
+        ? { ...result, detail: `${result.detail?.startsWith('время вышло') ? 'время вышло. ' : ''}${events.join('; ')}` }
+        : result);
+    };
+
+    deadTimer = setTimeout(() => finish({
+      error: 'fail',
+      detail: `время вышло (${Math.round(DEADLINE_MS / 1000)} с). ${last.detail ?? ''}`.trim(),
+    }), DEADLINE_MS);
+
+    const launch = () => {
+      if (finished) return;
+      clearTimeout(hedgeTimer);
+      clearTimeout(gapTimer);
+      if (next >= order.length) {
+        if (running === 0) finish(last);
+        return;
+      }
+      const model = order[next++];
+      running++;
+      run(model).then((r) => {
+        running--;
+        if (finished) return;
+        if (r.value) { finish(r.value); return; }
+        last = r.err;
+        if (r.fatal) { finish(r.err); return; }
+        gapTimer = setTimeout(launch, next >= MODELS.length ? GAP_SLOW_MS : GAP_FAST_MS);
+      });
+      hedgeTimer = setTimeout(launch, HEDGE_MS);
+    };
+
+    launch();
   });
-
-  // Нажатие ✅ — урок проведён
-  bot.callbackQuery(/^adm:done:(.+)$/, async (ctx) => {
-    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
-
-    const slotId = ctx.match[1];
-    const { data: slot } = await db.supabase
-      .from('slots').update({ status: 'done' })
-      .eq('id', slotId).select('*, users(first_name)').single();
-
-    await ctx.answerCallbackQuery({ text: '✅ Отмечен как проведённый' });
-
-    const name = slot?.users?.first_name ?? 'ученик';
-    const time = slot ? fmtTime(slot.starts_at) : '';
-    await ctx.editMessageText(
-      `✅ Урок ${time} с <b>${name}</b> — проведён.`,
-      { parse_mode: 'HTML' },
-    );
-  });
-
-  // Нажатие ❌ — урок отменён
-  bot.callbackQuery(/^adm:cancel:(.+)$/, async (ctx) => {
-    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
-
-    const slotId = ctx.match[1];
-    const { data: slot } = await db.supabase
-      .from('slots').update({ status: 'cancelled' })
-      .eq('id', slotId).select('*, users(first_name)').single();
-
-    await ctx.answerCallbackQuery({ text: '❌ Урок отменён' });
-
-    const name = slot?.users?.first_name ?? 'ученик';
-    const time = slot ? fmtTime(slot.starts_at) : '';
-    await ctx.editMessageText(
-      `❌ Урок ${time} с <b>${name}</b> — отменён.`,
-      { parse_mode: 'HTML' },
-    );
-  });
-
-  // -------------------------------------------------------------------
-  // /unpaid — кто ждёт подтверждения оплаты
-  // -------------------------------------------------------------------
-  bot.command('unpaid', async (ctx) => {
-    if (!isOwner(ctx)) return;
-
-    const orders = await pendingOrders();
-
-    if (!orders.length) {
-      await ctx.reply('✅ Неподтверждённых оплат нет.');
-      return;
-    }
-
-    let text = `💰 <b>Ждут подтверждения (${orders.length})</b>\n\n`;
-
-    for (const o of orders) {
-      const u = o.users;
-      const name = u?.first_name || u?.username || `id${u?.tg_id}`;
-      const date = new Date(o.created_at).toLocaleDateString('ru-RU', { timeZone: TZ });
-      text += `• <b>${name}</b> — ${o.title_snapshot} · ${o.amount_eur} € · ${date}\n`;
-      if (u?.username) text += `  @${u.username}\n`;
-    }
-
-    text += '\n<i>Подтвердить можно через /invoice или в разделе оплат.</i>';
-
-    await ctx.reply(text, { parse_mode: 'HTML' });
-  });
-
-  // -------------------------------------------------------------------
-  // /pay <имя или @username> <сумма> — записать ручную оплату
-  // Пример: /pay Василиса 500
-  //         /pay @username 12
-  // -------------------------------------------------------------------
-  bot.command('pay', async (ctx) => {
-    if (!isOwner(ctx)) return;
-
-    const args = ctx.message?.text?.split(/\s+/).slice(1) ?? [];
-    if (args.length < 2) {
-      await ctx.reply(
-        '❗️ Использование:\n<code>/pay Имя Сумма</code>\n\nПример: <code>/pay Василиса 500</code>',
-        { parse_mode: 'HTML' },
-      );
-      return;
-    }
-
-    const amount = parseFloat(args[args.length - 1]);
-    if (isNaN(amount) || amount <= 0) {
-      await ctx.reply('❗️ Неверная сумма. Пример: <code>/pay Василиса 500</code>', { parse_mode: 'HTML' });
-      return;
-    }
-
-    const nameQuery = args.slice(0, -1).join(' ');
-
-    // Ищем пользователя по имени или username
-    let user = null;
-    if (nameQuery.startsWith('@')) {
-      const uname = nameQuery.slice(1);
-      const { data } = await db.supabase
-        .from('users').select('*')
-        .ilike('username', uname).maybeSingle();
-      user = data;
-    } else {
-      const { data } = await db.supabase
-        .from('users').select('*')
-        .ilike('first_name', `%${nameQuery}%`).limit(1).maybeSingle();
-      user = data;
-    }
-
-    if (!user) {
-      await ctx.reply(`❗️ Пользователь «${nameQuery}» не найден в базе бота.\n\nПроверь имя или используй @username.`);
-      return;
-    }
-
-    // Записываем заказ со статусом paid (ручная оплата)
-    const { data: order, error } = await db.supabase
-      .from('orders')
-      .insert({
-        user_id:        user.id,
-        product_type:   'manual',
-        title_snapshot: `Ручная оплата от ${new Date().toLocaleDateString('ru-RU', { timeZone: TZ })}`,
-        amount_eur:     amount,
-        status:         'paid',
-        confirmed_at:   new Date().toISOString(),
-      })
-      .select().single();
-
-    if (error) {
-      await ctx.reply(`❗️ Ошибка записи: ${error.message}`);
-      return;
-    }
-
-    const displayName = user.first_name || user.username || `id${user.tg_id}`;
-    await ctx.reply(
-      `✅ Оплата записана\n\n` +
-      `👤 ${displayName}\n` +
-      `💰 ${amount} (eur/грн)\n` +
-      `📝 ID записи: ${order.id}`,
-    );
-  });
-}
-
-// ---------------------------------------------------------------------
-// Вечернее напоминание — вызывается из cron
-// ---------------------------------------------------------------------
-export async function sendEveningReminder(bot) {
-  if (!ENV.OWNER_TG_ID) return 0;
-
-  const slots = await todaySlots();
-  const pending = slots.filter((s) => s.status === 'paid'); // не отмечены
-
-  const pendingOrders_ = await pendingOrders();
-
-  if (!pending.length && !pendingOrders_.length) return 0;
-
-  let text = '🌙 <b>Итоги дня — не забудь отметить!</b>\n\n';
-
-  if (pending.length) {
-    text += `📅 <b>Не отмечены уроки (${pending.length}):</b>\n`;
-    for (const s of pending) {
-      text += `• ${fmtTime(s.starts_at)} — ${studentName(s)}\n`;
-    }
-    text += '\n→ /today\n\n';
-  }
-
-  if (pendingOrders_.length) {
-    text += `💰 <b>Ждут подтверждения оплаты (${pendingOrders_.length}):</b>\n`;
-    for (const o of pendingOrders_) {
-      const name = o.users?.first_name || o.users?.username || '?';
-      text += `• ${name} — ${o.amount_eur} €\n`;
-    }
-    text += '\n→ /unpaid';
-  }
-
-  await bot.api.sendMessage(ENV.OWNER_TG_ID, text, { parse_mode: 'HTML' });
-  return 1;
 }
