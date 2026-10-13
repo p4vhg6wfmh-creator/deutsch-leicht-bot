@@ -6,7 +6,7 @@ const bot = getBot();
 
 const handle = webhookCallback(bot, 'std/http', {
   secretToken: ENV.WEBHOOK_SECRET || undefined,
-  timeoutMilliseconds: 8_000,
+  timeoutMilliseconds: 30_000,
 });
 
 export default async (request) => {
