@@ -593,6 +593,8 @@ export function registerTeacher(bot) {
     if (ctx.message.text?.startsWith('/')) return next();
     const u = await db.ensureUser(ctx.from);
     const st = u.state;
+        // свободный текст владельца (без активного сценария) → ИИ-помощник
+    if ((!st || st === 'tc_ai_confirm') && ctx.chat.type === 'private') return handleAI(ctx, u);
     if (!st || !st.startsWith('tc_')) return next();
     const txt = ctx.message.text.trim();
 
@@ -878,6 +880,342 @@ export function registerTeacher(bot) {
     const u = await db.ensureUser(ctx.from);
     await db.setState(u.id, 'tc_rcptask', { student_id: ctx.match[1] });
     await ctx.reply('Что написать ученику по квитанции? Напиши сообщение — я перешлю ему.');
+  });
+  // ======================================================================
+  // 🤖 ИИ-ПОМОЩНИК: свободный текст → команды → «Верно?» → запись
+  // ======================================================================
+  const AI_KIND = { single: 'разовая', package: 'абонемент', other: 'другое' };
+  const PACK_DEFAULT = 10;
+  const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s ?? ''));
+  const cleanTime = (t) => (/^\d{1,2}:\d{2}$/.test(String(t ?? '')) ? String(t) : null);
+  const aiWhen = (date, time) => `${fmtDate(date)}${time ? ' в ' + time : ''}`;
+
+  async function findStudent(name) {
+    const safe = String(name ?? '').trim().replace(/[%_]/g, '\\$&');
+    if (!safe) return null;
+    const { data } = await db.supabase
+      .from('tc_students').select('*').ilike('name', safe).limit(1);
+    return data?.[0] ?? null;
+  }
+
+  async function lessonsOf(studentId, date) {
+    const { data } = await db.supabase
+      .from('tc_lessons').select('*')
+      .eq('student_id', studentId).eq('lesson_date', date).order('lesson_time');
+    return data ?? [];
+  }
+
+  // Списать 1 урок из абонемента (так же, как при кнопке «проведён»)
+  async function consumePackage(studentId) {
+    const { data: s } = await db.supabase
+      .from('tc_students').select('package_left').eq('id', studentId).single();
+    if (!s || !(s.package_left > 0)) return '';
+    const left = s.package_left - 1;
+    await db.supabase.from('tc_students').update({ package_left: left }).eq('id', studentId);
+    return left > 0 ? ` · абонемент: осталось ${left}` : ' · абонемент закончился ⚠️';
+  }
+
+  // Проверка команды ИИ + понятная строка для «Верно?». Ничего не пишет в базу.
+  // Возвращает { ok, line, a } или null (если команду надо пропустить).
+  async function prepare(a) {
+    const name = String(a?.student ?? '').trim();
+    const warn = (t) => ({ ok: false, line: `⚠️ ${t}` });
+    const needName = () => warn('Не поняла, о ком речь в одном из пунктов.');
+
+    switch (a?.type) {
+      case 'report': {
+        const period = ['today', 'week', 'month'].includes(a.period) ? a.period : 'week';
+        const label = { today: 'за сегодня', week: 'за неделю', month: 'за месяц' }[period];
+        return { ok: true, a: { type: 'report', period }, line: `📊 Показать отчёт ${label}` };
+      }
+
+      case 'add_lesson': {
+        if (!name) return needName();
+        if (!isDate(a.date)) return warn(`${name}: не поняла дату урока.`);
+        const status = ['planned', 'done', 'cancelled', 'noshow'].includes(a.status) ? a.status : 'planned';
+        const stud = await findStudent(name);
+        // Урок уже есть и мы просто меняем статус → это отметка, а не новая запись
+        if (stud && status !== 'planned' && (await lessonsOf(stud.id, a.date)).length) {
+          return prepare({ type: 'set_status', student: stud.name, date: a.date, status });
+        }
+        const time = cleanTime(a.time);
+        const price = a.price != null && Number(a.price) >= 0
+          ? Number(a.price) : (Number(stud?.default_price_uah) || 0);
+        const who = stud ? stud.name : `${name} (новый ученик)`;
+        return {
+          ok: true,
+          a: { type: 'add_lesson', student: stud?.name ?? name, date: a.date, time, status, price },
+          line: `➕ Урок: ${who} · ${aiWhen(a.date, time)} · ${STATUS[status]} · ${uah(price)}`,
+        };
+      }
+
+      case 'set_status': {
+        if (!name) return needName();
+        if (!isDate(a.date) || !['done', 'cancelled', 'noshow'].includes(a.status)) {
+          return warn(`${name}: не поняла дату или статус.`);
+        }
+        const stud = await findStudent(name);
+        if (!stud) return warn(`Не нашла ученика «${name}». Напиши имя как в списке.`);
+        const ls = await lessonsOf(stud.id, a.date);
+        // урока на этот день нет → записываем новый сразу с этим статусом
+        if (!ls.length) {
+          return prepare({ type: 'add_lesson', student: stud.name, date: a.date, time: null, status: a.status, price: null });
+        }
+        const target = ls.find((l) => l.status !== a.status);
+        if (!target) return warn(`${stud.name}, ${fmtDate(a.date)}: уже отмечено «${STATUS[a.status]}».`);
+        let extra = '';
+        if (a.status === 'done' && stud.package_left > 0) {
+          extra = ` · спишу 1 из абонемента (останется ${stud.package_left - 1})`;
+        }
+        return {
+          ok: true,
+          a: { type: 'set_status', student: stud.name, status: a.status, lessonId: target.id },
+          line: `${STATUS[a.status]}: ${stud.name}, ${aiWhen(a.date, target.lesson_time)}${extra}`,
+        };
+      }
+
+      case 'add_payment': {
+        if (!name) return needName();
+        const kind = ['single', 'package', 'other'].includes(a.kind) ? a.kind : 'single';
+        const stud = await findStudent(name);
+        let amount = a.amount != null ? Number(a.amount) : 0;
+        let usual = false;
+        if (!(amount > 0) && kind === 'single' && stud?.default_price_uah > 0) {
+          amount = Number(stud.default_price_uah); usual = true;
+        }
+        if (!(amount > 0)) {
+          return warn(`${name}: не названа сумма оплаты. Напиши, например: «${name} оплатила 700».`);
+        }
+        const lessons = kind === 'package'
+          ? (Number(a.lessons) > 0 ? Math.round(Number(a.lessons)) : PACK_DEFAULT) : null;
+        const who = stud ? stud.name : `${name} (новый ученик)`;
+        const tail = kind === 'package'
+          ? ` · ${lessons} уроков${Number(a.lessons) > 0 ? '' : ' (по умолчанию)'}` : '';
+        return {
+          ok: true,
+          a: { type: 'add_payment', student: stud?.name ?? name, amount, kind, lessons },
+          line: `💰 Оплата: ${who} · ${uah(amount)}${usual ? ' (обычная цена)' : ''} · ${AI_KIND[kind]}${tail}`,
+        };
+      }
+
+      case 'delete_lesson': {
+        if (!name) return needName();
+        if (!isDate(a.date)) return warn(`${name}: не поняла дату урока для удаления.`);
+        const stud = await findStudent(name);
+        if (!stud) return warn(`Не нашла ученика «${name}».`);
+        const ls = await lessonsOf(stud.id, a.date);
+        if (!ls.length) return warn(`У ${stud.name} нет урока ${fmtDate(a.date)}.`);
+        if (ls.length > 1) {
+          return warn(`У ${stud.name} несколько уроков ${fmtDate(a.date)} — удали нужный через 📖 Уроки.`);
+        }
+        const note = ls[0].status === 'done' ? ' · остаток абонемента не изменится' : '';
+        return {
+          ok: true,
+          a: { type: 'delete_lesson', student: stud.name, lessonId: ls[0].id },
+          line: `🗑 Удалить урок: ${stud.name}, ${aiWhen(a.date, ls[0].lesson_time)} · ${STATUS[ls[0].status]}${note}`,
+        };
+      }
+
+      case 'delete_last_payment': {
+        if (!name) return needName();
+        const stud = await findStudent(name);
+        if (!stud) return warn(`Не нашла ученика «${name}».`);
+        const { data } = await db.supabase
+          .from('tc_payments').select('*').eq('student_id', stud.id)
+          .order('pay_date', { ascending: false }).limit(1);
+        const p = data?.[0];
+        if (!p) return warn(`У ${stud.name} нет записанных оплат.`);
+        const note = p.kind === 'package' ? ' · остаток абонемента не изменится' : '';
+        return {
+          ok: true,
+          a: { type: 'delete_last_payment', student: stud.name, paymentId: p.id },
+          line: `🗑 Удалить оплату: ${stud.name} · ${uah(p.amount_uah)} · ${fmtDate(p.pay_date)} · ${AI_KIND[p.kind] ?? p.kind}${note}`,
+        };
+      }
+
+      case 'reset_package': {
+        if (!name) return needName();
+        const stud = await findStudent(name);
+        if (!stud) return warn(`Не нашла ученика «${name}».`);
+        const n = Number(a.lessons) >= 0 ? Math.round(Number(a.lessons)) : 0;
+        return {
+          ok: true,
+          a: { type: 'reset_package', student: stud.name, lessons: n },
+          line: `🔄 Абонемент ${stud.name}: было ${stud.package_left || 0} → станет ${n} уроков`,
+        };
+      }
+
+      default:
+        return null; // «none» и всё непонятное — пропускаем
+    }
+  }
+
+  // Запись в базу (вызывается только после «Верно»). Возвращает строку-результат.
+  async function execute(ctx, a) {
+    switch (a.type) {
+      case 'report': {
+        if (a.period === 'today') await report(ctx, today(), today(), 'за сегодня');
+        else if (a.period === 'month') await report(ctx, monthStart(), today(), 'за месяц');
+        else {
+          const w = new Date(); w.setDate(w.getDate() - 6);
+          await report(ctx, w.toISOString().slice(0, 10), today(), 'за неделю');
+        }
+        return null;
+      }
+
+      case 'add_lesson': {
+        const stud = await ensureStudent(a.student);
+        await db.supabase.from('tc_lessons').insert({
+          student_id: stud.id, student_name: stud.name,
+          lesson_date: a.date, lesson_time: a.time, price_uah: a.price,
+          status: a.status, ask_payment: false,
+        });
+        if (!stud.default_price_uah && a.price > 0) {
+          await db.supabase.from('tc_students')
+            .update({ default_price_uah: a.price }).eq('id', stud.id);
+        }
+        const extra = a.status === 'done' ? await consumePackage(stud.id) : '';
+        return `✅ Записала урок: ${stud.name} · ${aiWhen(a.date, a.time)} · ${STATUS[a.status]}${extra}`;
+      }
+
+      case 'set_status': {
+        const { data: les } = await db.supabase
+          .from('tc_lessons').select('*').eq('id', a.lessonId).maybeSingle();
+        if (!les) return `⚠️ ${a.student}: урок не найден (возможно, уже удалён).`;
+        if (les.status === a.status) return `${a.student}: уже отмечено «${STATUS[a.status]}».`;
+        await db.supabase.from('tc_lessons').update({ status: a.status }).eq('id', les.id);
+        const extra = a.status === 'done' ? await consumePackage(les.student_id) : '';
+        return `${STATUS[a.status]}: ${a.student}, ${fmtDate(les.lesson_date)}${extra}`;
+      }
+
+      case 'add_payment': {
+        const stud = await ensureStudent(a.student);
+        const row = {
+          student_id: stud.id, student_name: stud.name,
+          amount_uah: a.amount, pay_date: today(), kind: a.kind,
+        };
+        if (a.kind === 'package') row.note = `абонемент ${a.lessons} уроков`;
+        await db.supabase.from('tc_payments').insert(row);
+        if (a.kind === 'package') {
+          const balance = (stud.package_left || 0) + a.lessons;
+          await db.supabase.from('tc_students')
+            .update({ package_left: balance, package_total: a.lessons }).eq('id', stud.id);
+          return `💰 Записала оплату: ${stud.name} · ${uah(a.amount)} · абонемент ${a.lessons} уроков. На балансе: ${balance}.`;
+        }
+        return `💰 Записала оплату: ${stud.name} · ${uah(a.amount)} · ${AI_KIND[a.kind]}`;
+      }
+
+      case 'delete_lesson':
+        await db.supabase.from('tc_lessons').delete().eq('id', a.lessonId);
+        return `🗑 Удалила урок: ${a.student}`;
+
+      case 'delete_last_payment':
+        await db.supabase.from('tc_payments').delete().eq('id', a.paymentId);
+        return `🗑 Удалила оплату: ${a.student}`;
+
+      case 'reset_package': {
+        const { data: s } = await db.supabase
+          .from('tc_students').select('id').ilike('name', a.student).limit(1);
+        if (!s?.[0]) return `⚠️ Не нашла ученика ${a.student}.`;
+        const patch = { package_left: a.lessons };
+        if (a.lessons > 0) patch.package_total = a.lessons;
+        await db.supabase.from('tc_students').update(patch).eq('id', s[0].id);
+        return `🔄 Абонемент ${a.student}: теперь ${a.lessons} уроков`;
+      }
+
+      default:
+        return null;
+    }
+  }
+
+  // Свободный текст владельца → ИИ → «Верно?»
+  async function handleAI(ctx, u) {
+    await ctx.replyWithChatAction('typing').catch(() => {});
+    const list = await students();
+    const res = await parseMessage(ctx.message.text, {
+      students: list.map((s) => s.name),
+      today: today(),
+      weekday: new Intl.DateTimeFormat('ru-RU', { timeZone: TZ, weekday: 'long' }).format(new Date()),
+    });
+
+    if (res.error === 'no_key') {
+      return ctx.reply('🔑 Не нашла ключ Gemini. Проверь переменную GEMINI_API_KEY в Netlify (после добавления нужен новый деплой).');
+    }
+    if (res.error === 'limit') {
+      return ctx.reply('⏳ Лимит бесплатного ИИ сейчас исчерпан. Подожди минуту или пользуйся кнопками: /cab');
+    }
+    if (res.error) {
+      return ctx.reply('😕 ИИ сейчас не ответил. Попробуй ещё раз или открой /cab');
+    }
+
+    const lines = [];
+    const ready = [];
+    for (const raw of res.actions) {
+      const p = await prepare(raw);
+      if (!p) continue;
+      lines.push(p.line);
+      if (p.ok) ready.push(p.a);
+    }
+
+    if (!lines.length) {
+      return ctx.reply(res.say || 'Не поняла, что записать 🤔 Напиши, например: «Аня сегодня в 15:00 провели».');
+    }
+    if (!ready.length) {
+      return ctx.reply(lines.join('\n') + (res.say ? `\n\n${res.say}` : ''));
+    }
+    // Только отчёты — ничего не меняют, показываем сразу
+    if (ready.every((a) => a.type === 'report')) {
+      await db.clearState(u.id);
+      for (const a of ready) await execute(ctx, a);
+      return;
+    }
+
+    await db.setState(u.id, 'tc_ai_confirm', { actions: ready });
+    const hasWarn = lines.length > ready.length;
+    const kb = new InlineKeyboard().text('✅ Верно', 'tc:ai:ok').text('✖️ Отмена', 'tc:ai:no');
+    await ctx.reply(
+      `🤖 Я поняла так:\n\n${lines.join('\n')}\n\n` +
+      (hasWarn ? '⚠️ — эти пункты я пропущу.\n' : '') +
+      (res.say ? `${res.say}\n` : '') +
+      'Записать?',
+      { reply_markup: kb },
+    );
+  }
+
+  bot.callbackQuery('tc:ai:ok', async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    const u = await db.ensureUser(ctx.from);
+    const actions = u.state === 'tc_ai_confirm' ? u.state_data?.actions : null;
+    if (!actions?.length) {
+      await ctx.answerCallbackQuery({ text: 'Это уже неактуально' });
+      return ctx.editMessageReplyMarkup().catch(() => {});
+    }
+    await db.clearState(u.id); // сразу, чтобы двойное нажатие не записало дважды
+    await ctx.answerCallbackQuery({ text: 'Записываю…' });
+    await ctx.editMessageReplyMarkup().catch(() => {});
+    const out = [];
+    for (const a of actions) {
+      try {
+        const r = await execute(ctx, a);
+        if (r) out.push(r);
+      } catch (e) {
+        console.error('AI execute', a?.type, e);
+        out.push(`⚠️ Не получилось: ${a?.type} ${a?.student ?? ''}`);
+      }
+    }
+    if (out.length) {
+      await ctx.reply(out.join('\n'), {
+        reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
+    }
+  });
+
+  bot.callbackQuery('tc:ai:no', async (ctx) => {
+    if (!isOwner(ctx)) return ctx.answerCallbackQuery();
+    const u = await db.ensureUser(ctx.from);
+    if (u.state === 'tc_ai_confirm') await db.clearState(u.id);
+    await ctx.answerCallbackQuery({ text: 'Отменила' });
+    await ctx.editMessageReplyMarkup().catch(() => {});
+    await ctx.reply('Отменила, ничего не записала.');
   });
 }
 
