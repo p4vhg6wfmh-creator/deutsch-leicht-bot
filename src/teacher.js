@@ -1145,7 +1145,7 @@ export function registerTeacher(bot) {
       return ctx.reply('⏳ Лимит бесплатного ИИ сейчас исчерпан. Подожди минуту или пользуйся кнопками: /cab');
     }
     if (res.error) {
-      return ctx.reply('😕 ИИ сейчас не ответил. Попробуй ещё раз или открой /cab');
+           return ctx.reply(`😕 ИИ сейчас не ответил. Попробуй ещё раз или открой /cab\n\n(для отладки: ${res.detail ?? '?'})`);
     }
 
     const lines = [];
