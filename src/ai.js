@@ -5,6 +5,9 @@ const MODEL = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Модели, которым не подошла настройка «короткого обдумывания» — для них шлём запрос без неё.
+const noThinking = new Set();
+
 const RULES = `Ты разбираешь сообщения учителя немецкого для её кабинета учёта.
 Учитель пишет по-русски (иногда по-украински) свободным текстом.
 Верни ТОЛЬКО JSON такого вида: {"actions":[...],"say":""}
@@ -36,7 +39,7 @@ export async function parseMessage(text, { students, today, weekday }) {
   const key = (process.env.GEMINI_API_KEY || '').trim().replace(/^["']+|["']+$/g, '');
   if (!key) return { error: 'no_key' };
 
-  const body = JSON.stringify({
+  const makeBody = (model) => JSON.stringify({
     systemInstruction: { parts: [{ text: RULES }] },
     contents: [{
       role: 'user',
@@ -47,8 +50,23 @@ export async function parseMessage(text, { students, today, weekday }) {
           `Сообщение:\n${text}`,
       }],
     }],
-    generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0,
+      // короткое обдумывание: ответ приходит заметно быстрее
+      ...(noThinking.has(model) ? {} : { thinkingConfig: { thinkingLevel: 'low' } }),
+    },
   });
+
+  const send = (model, timeoutMs) => fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: makeBody(model),
+      signal: AbortSignal.timeout(timeoutMs),
+    },
+  );
 
   // Бесплатные модели иногда отвечают «высокая нагрузка» (503). Тогда пробуем
   // следующую модель, а если перегружены все — делаем ещё круг через пару секунд.
@@ -60,20 +78,21 @@ export async function parseMessage(text, { students, today, weekday }) {
     let retryable = false;
 
     for (const model of models) {
-      const left = deadline - Date.now();
-      if (left < 1500) return last;
+      if (deadline - Date.now() < 1500) return last;
 
       let res;
       try {
-        res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-            body,
-            signal: AbortSignal.timeout(Math.min(10000, left)),
-          },
-        );
+        res = await send(model, Math.min(12000, deadline - Date.now()));
+
+        // Если модель не приняла настройку обдумывания (400, но не из-за ключа) —
+        // повторяем без неё и запоминаем это для модели.
+        if (res.status === 400 && !noThinking.has(model)) {
+          const msg = await res.clone().text();
+          if (!/API_KEY_INVALID|API key/i.test(msg) && deadline - Date.now() > 1500) {
+            noThinking.add(model);
+            res = await send(model, Math.min(12000, deadline - Date.now()));
+          }
+        }
       } catch (e) {
         console.error('GEMINI network', model, e?.message);
         last = { error: 'fail', detail: `${model}: нет ответа (${e?.message})` };
