@@ -1,6 +1,7 @@
 import { InlineKeyboard } from 'grammy';
 import * as db from './db.js';
 import { ENV } from './config.js';
+import { parseMessage } from './ai.js';
 
 const TZ = 'Europe/Kyiv';
 const uah = (n) => `${Number(n).toFixed(0)} грн`;
