@@ -593,7 +593,7 @@ export function registerTeacher(bot) {
     if (ctx.message.text?.startsWith('/')) return next();
     const u = await db.ensureUser(ctx.from);
     const st = u.state;
-        // свободный текст владельца (без активного сценария) → ИИ-помощник
+    // свободный текст владельца (без активного сценария) → ИИ-помощник
     if ((!st || st === 'tc_ai_confirm') && ctx.chat.type === 'private') return handleAI(ctx, u);
     if (!st || !st.startsWith('tc_')) return next();
     const txt = ctx.message.text.trim();
@@ -881,6 +881,7 @@ export function registerTeacher(bot) {
     await db.setState(u.id, 'tc_rcptask', { student_id: ctx.match[1] });
     await ctx.reply('Что написать ученику по квитанции? Напиши сообщение — я перешлю ему.');
   });
+
   // ======================================================================
   // 🤖 ИИ-ПОМОЩНИК: свободный текст → команды → «Верно?» → запись
   // ======================================================================
@@ -1145,7 +1146,7 @@ export function registerTeacher(bot) {
       return ctx.reply('⏳ Лимит бесплатного ИИ сейчас исчерпан. Подожди минуту или пользуйся кнопками: /cab');
     }
     if (res.error) {
-           return ctx.reply(`😕 ИИ сейчас не ответил. Попробуй ещё раз или открой /cab\n\n(для отладки: ${res.detail ?? '?'})`);
+      return ctx.reply(`😕 ИИ сейчас не ответил. Попробуй ещё раз или открой /cab\n\n(для отладки: ${res.detail ?? '?'})`);
     }
 
     const lines = [];
@@ -1193,8 +1194,12 @@ export function registerTeacher(bot) {
     await db.clearState(u.id); // сразу, чтобы двойное нажатие не записало дважды
     await ctx.answerCallbackQuery({ text: 'Записываю…' });
     await ctx.editMessageReplyMarkup().catch(() => {});
+    // Порядок записи: сначала обнуление и оплаты, потом уроки — чтобы урок
+    // списался из только что купленного абонемента. Внутри групп порядок сохраняется.
+    const rank = (a) => (a.type === 'reset_package' ? 0 : a.type === 'add_payment' ? 1 : 2);
+    const ordered = [...actions].sort((x, y) => rank(x) - rank(y));
     const out = [];
-    for (const a of actions) {
+    for (const a of ordered) {
       try {
         const r = await execute(ctx, a);
         if (r) out.push(r);
