@@ -4,7 +4,32 @@ import { ENV } from './config.js';
 import { parseMessage } from './ai.js';
 
 const TZ = 'Europe/Kyiv';
-const uah = (n) => `${Number(n).toFixed(0)} грн`;
+// --- Деньги: у каждого ученика своя валюта (UAH / EUR / USD) ---
+const SYM = { UAH: 'грн', EUR: '€', USD: '$' };
+function money(n, cur) {
+  const v = Math.round(Number(n || 0) * 100) / 100;
+  return `${v} ${SYM[cur] || SYM.UAH}`;
+}
+// «€», «евро», «eur» → 'EUR'; не поняла → null
+function normCur(c) {
+  const t = String(c ?? '').trim().toLowerCase();
+  if (!t) return null;
+  if (['eur', '€', 'евро', 'euro'].includes(t)) return 'EUR';
+  if (['usd', '$', 'доллар', 'долларов', 'доллары', 'долл'].includes(t)) return 'USD';
+  if (['uah', 'грн', '₴', 'гривна', 'гривен', 'гривны'].includes(t)) return 'UAH';
+  return null;
+}
+const curOf = (stud) => stud?.currency || 'UAH';
+// Сумма по валютам отдельно: «1200 грн + 130 €»
+function sumText(rows, field) {
+  const by = {};
+  for (const r of rows) {
+    const c = r.currency || 'UAH';
+    by[c] = (by[c] || 0) + Number(r[field] || 0);
+  }
+  const parts = Object.entries(by).map(([c, v]) => money(v, c));
+  return parts.length ? parts.join(' + ') : money(0, 'UAH');
+}
 
 function today() {
   return new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(new Date());
@@ -62,12 +87,13 @@ async function students() {
   return data ?? [];
 }
 
-async function ensureStudent(name) {
+// Новые ученики по умолчанию — в евро (старые в базе остаются в гривнах)
+async function ensureStudent(name, currency = 'EUR') {
   const { data: ex } = await db.supabase
     .from('tc_students').select('*').ilike('name', name).maybeSingle();
   if (ex) return ex;
   const { data } = await db.supabase
-    .from('tc_students').insert({ name }).select().single();
+    .from('tc_students').insert({ name, currency: normCur(currency) || 'EUR' }).select().single();
   return data;
 }
 
@@ -228,7 +254,7 @@ export function registerTeacher(bot) {
     } else {
       for (const l of lessons) {
         const payMark = l.ask_payment ? ' 💳' : '';
-        txt += `${l.lesson_time || '—'} · ${l.student_name} · ${uah(l.price_uah)}${payMark} · ${STATUS[l.status]}\n`;
+        txt += `${l.lesson_time || '—'} · ${l.student_name} · ${money(l.price_uah, l.currency)}${payMark} · ${STATUS[l.status]}\n`;
         if (l.status === 'planned') {
           kb.text(`✅ ${l.student_name}`, `tc:done:${l.id}`)
             .text(`❌`, `tc:cancel:${l.id}`)
@@ -339,7 +365,7 @@ export function registerTeacher(bot) {
     let txt = '📖 <b>Последние уроки</b>\n\nНажми 🗑, чтобы удалить запись.\n\n';
     const kb = new InlineKeyboard();
     for (const l of data) {
-      txt += `${fmtDate(l.lesson_date)} ${l.lesson_time || ''} · ${l.student_name} · ${uah(l.price_uah)} · ${STATUS[l.status]}\n`;
+      txt += `${fmtDate(l.lesson_date)} ${l.lesson_time || ''} · ${l.student_name} · ${money(l.price_uah, l.currency)} · ${STATUS[l.status]}\n`;
       kb.text(`🗑 ${l.student_name} ${fmtDate(l.lesson_date)}`, `tc:dellesson:${l.id}`).row();
     }
     kb.text('← В кабинет', 'tc:home');
@@ -357,7 +383,7 @@ export function registerTeacher(bot) {
       .text('🗑 Да, удалить', `tc:dellesson2:${l.id}`)
       .text('Отмена', 'tc:lessons');
     await ctx.reply(
-      `Удалить урок?\n${l.student_name} · ${fmtDate(l.lesson_date)} ${l.lesson_time || ''} · ${uah(l.price_uah)}`,
+      `Удалить урок?\n${l.student_name} · ${fmtDate(l.lesson_date)} ${l.lesson_time || ''} · ${money(l.price_uah, l.currency)}`,
       { reply_markup: kb });
   });
   bot.callbackQuery(/^tc:dellesson2:(.+)$/, async (ctx) => {
@@ -383,8 +409,8 @@ export function registerTeacher(bot) {
     let txt = '💰 <b>Последние оплаты</b>\n\nНажми 🗑, чтобы удалить.\n\n';
     const kb = new InlineKeyboard();
     for (const p of data) {
-      txt += `${fmtDate(p.pay_date)} · ${p.student_name} · ${uah(p.amount_uah)} · ${KIND[p.kind]}\n`;
-      kb.text(`🗑 ${p.student_name} ${uah(p.amount_uah)}`, `tc:delpay:${p.id}`).row();
+      txt += `${fmtDate(p.pay_date)} · ${p.student_name} · ${money(p.amount_uah, p.currency)} · ${KIND[p.kind]}\n`;
+      kb.text(`🗑 ${p.student_name} ${money(p.amount_uah, p.currency)}`, `tc:delpay:${p.id}`).row();
     }
     kb.text('← В кабинет', 'tc:home');
     await ctx.reply(txt, { parse_mode: 'HTML', reply_markup: kb });
@@ -399,7 +425,7 @@ export function registerTeacher(bot) {
       .text('🗑 Да, удалить', `tc:delpay2:${p.id}`)
       .text('Отмена', 'tc:payments');
     await ctx.reply(
-      `Удалить оплату?\n${p.student_name} · ${uah(p.amount_uah)} · ${fmtDate(p.pay_date)}`,
+      `Удалить оплату?\n${p.student_name} · ${money(p.amount_uah, p.currency)} · ${fmtDate(p.pay_date)}`,
       { reply_markup: kb });
   });
   bot.callbackQuery(/^tc:delpay2:(.+)$/, async (ctx) => {
@@ -433,8 +459,8 @@ export function registerTeacher(bot) {
       .gte('pay_date', from).lte('pay_date', to);
     const done = (lessons ?? []).filter((l) => l.status === 'done');
     const cancelled = (lessons ?? []).filter((l) => l.status === 'cancelled' || l.status === 'noshow');
-    const earned = (pays ?? []).reduce((a, p) => a + Number(p.amount_uah), 0);
-    const lessonSum = done.reduce((a, l) => a + Number(l.price_uah), 0);
+    const earnedText = sumText(pays ?? [], 'amount_uah');
+    const lessonSumText = sumText(done, 'price_uah');
     // по ученикам
     const byStud = {};
     for (const l of done) byStud[l.student_name] = (byStud[l.student_name] || 0) + 1;
@@ -446,8 +472,8 @@ export function registerTeacher(bot) {
       `${fmtDate(from)} — ${fmtDate(to)}\n\n` +
       `Проведено уроков: <b>${done.length}</b>\n` +
       `Отменено/не пришли: ${cancelled.length}\n` +
-      `Сумма проведённых уроков: ${uah(lessonSum)}\n\n` +
-      `💰 Получено оплат: <b>${uah(earned)}</b>\n\n` +
+      `Сумма проведённых уроков: ${lessonSumText}\n\n` +
+      `💰 Получено оплат: <b>${earnedText}</b>\n\n` +
       (studLines ? `<b>По ученикам:</b>\n${studLines}` : ''),
       { parse_mode: 'HTML',
         reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') },
@@ -465,7 +491,7 @@ export function registerTeacher(bot) {
       const { count } = await db.supabase.from('tc_lessons')
         .select('id', { count: 'exact', head: true })
         .eq('student_id', s.id).eq('status', 'done');
-      const price = s.default_price_uah ? `${Number(s.default_price_uah).toFixed(0)} грн` : 'цена не задана';
+      const price = s.default_price_uah ? money(s.default_price_uah, s.currency) : 'цена не задана';
       const pack = s.package_left > 0 ? ` · 🎟 абонемент: ${s.package_left}` : '';
       const linked = s.tg_id ? ' · 🔗 привязан' : '';
       txt += `${s.name} — ${count ?? 0} уроков · ${price}${pack}${linked}\n`;
@@ -504,10 +530,10 @@ export function registerTeacher(bot) {
     const ps = pays ?? [];
     const done = ls.filter((l) => l.status === 'done').length;
     const missed = ls.filter((l) => l.status === 'cancelled' || l.status === 'noshow').length;
-    const paidSum = ps.reduce((a, p) => a + Number(p.amount_uah), 0);
+    const paidText = sumText(ps, 'amount_uah');
 
     const price = stud.default_price_uah
-      ? `${Number(stud.default_price_uah).toFixed(0)} грн` : 'не задана';
+      ? money(stud.default_price_uah, stud.currency) : 'не задана';
     const pack = stud.package_left > 0 ? `\n🎟 Абонемент: осталось ${stud.package_left}` : '';
     const linked = stud.tg_id ? '🔗 привязан' : '🔗 не привязан';
 
@@ -515,14 +541,14 @@ export function registerTeacher(bot) {
     txt += `${linked} · цена ${price}${pack}\n`;
     txt += `\n<b>За 3 месяца:</b>\n`;
     txt += `Проведено уроков: ${done} · пропущено/отменено: ${missed}\n`;
-    txt += `Всего внесено оплат: ${uah(paidSum)}\n`;
+    txt += `Всего внесено оплат: ${paidText}\n`;
 
     txt += `\n<b>📖 Уроки:</b>\n`;
     if (!ls.length) {
       txt += 'нет за этот период\n';
     } else {
       for (const l of ls) {
-        txt += `${fmtDate(l.lesson_date)} ${l.lesson_time || '—'} · ${uah(l.price_uah)} · ${STATUS[l.status]}\n`;
+        txt += `${fmtDate(l.lesson_date)} ${l.lesson_time || '—'} · ${money(l.price_uah, l.currency)} · ${STATUS[l.status]}\n`;
       }
     }
 
@@ -532,7 +558,7 @@ export function registerTeacher(bot) {
     } else {
       const KIND = { single: 'разовая', package: 'абонемент', other: 'другое' };
       for (const p of ps) {
-        txt += `${fmtDate(p.pay_date)} · ${uah(p.amount_uah)} · ${KIND[p.kind] || p.kind}\n`;
+        txt += `${fmtDate(p.pay_date)} · ${money(p.amount_uah, p.currency)} · ${KIND[p.kind] || p.kind}\n`;
       }
     }
 
@@ -654,7 +680,7 @@ export function registerTeacher(bot) {
       const s = await ensureStudent(txt);
       await db.setState(u.id, 'tc_payamount', { student_id: s.id });
       return ctx.reply(
-        `Ученик ${s.name} добавлен ✅\n\nСколько заплатили? Сумма в гривнах, например 700`,
+        `Ученик ${s.name} добавлен ✅\n\nСколько заплатили? Напиши сумму числом, например 130 (валюта ученика: ${SYM[curOf(s)]})`,
       );
     }
     if (st === 'tc_time') {
@@ -662,14 +688,14 @@ export function registerTeacher(bot) {
       await db.setState(u.id, 'tc_price', sd);
       // есть ли цена по умолчанию у ученика
       const { data: stud } = await db.supabase
-        .from('tc_students').select('name, default_price_uah').eq('id', sd.student_id).single();
+        .from('tc_students').select('name, default_price_uah, currency').eq('id', sd.student_id).single();
       if (stud?.default_price_uah > 0) {
         const kb = new InlineKeyboard()
-          .text(`${Number(stud.default_price_uah).toFixed(0)} грн (как обычно)`, `tc:useprice:${stud.default_price_uah}`).row()
+          .text(`${money(stud.default_price_uah, stud.currency)} (как обычно)`, `tc:useprice:${stud.default_price_uah}`).row()
           .text('Другая сумма', 'tc:otherprice');
         return ctx.reply(`Цена урока для ${stud.name}?`, { reply_markup: kb });
       }
-      return ctx.reply('Цена урока в гривнах? Например 700\n(или «0», если бесплатно/абонемент)');
+      return ctx.reply(`Цена урока (${SYM[curOf(stud)]})? Напиши число, например 12\n(или «0», если бесплатно/абонемент)`);
     }
     if (st === 'tc_price') {
       const price = Number(txt.replace(',', '.')) || 0;
@@ -685,9 +711,9 @@ export function registerTeacher(bot) {
       const { data: stud } = await db.supabase
         .from('tc_students')
         .update({ default_price_uah: price })
-        .eq('id', u.state_data.student_id).select('name').single();
+        .eq('id', u.state_data.student_id).select('name, currency').single();
       await db.clearState(u.id);
-      return ctx.reply(`Готово: цена для ${stud.name} теперь ${price} грн ✅`, {
+      return ctx.reply(`Готово: цена для ${stud.name} теперь ${money(price, stud.currency)} ✅`, {
         reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home'),
       });
     }
@@ -696,10 +722,10 @@ export function registerTeacher(bot) {
       if (!(count > 0)) return ctx.reply('Нужно число уроков, например 10');
       const { student_id, amount } = u.state_data;
       const { data: stud } = await db.supabase
-        .from('tc_students').select('name, package_left').eq('id', student_id).single();
+        .from('tc_students').select('name, package_left, currency').eq('id', student_id).single();
       await db.supabase.from('tc_payments').insert({
         student_id, student_name: stud.name,
-        amount_uah: amount, pay_date: today(), kind: 'package',
+        amount_uah: amount, currency: curOf(stud), pay_date: today(), kind: 'package',
         note: `абонемент ${count} уроков`,
       });
       // добавляем уроки к остатку (если старый абонемент не закончился — плюсуем)
@@ -709,13 +735,13 @@ export function registerTeacher(bot) {
       }).eq('id', student_id);
       await db.clearState(u.id);
       return ctx.reply(
-        `Абонемент записан: ${stud.name} · ${uah(amount)} · ${count} уроков ✅\n` +
+        `Абонемент записан: ${stud.name} · ${money(amount, stud.currency)} · ${count} уроков ✅\n` +
         `Теперь на балансе: ${(stud.package_left || 0) + count} уроков.`,
         { reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') });
     }
     if (st === 'tc_payamount') {
       const amount = Number(txt.replace(',', '.'));
-      if (!(amount > 0)) return ctx.reply('Нужна сумма числом, например 700');
+      if (!(amount > 0)) return ctx.reply('Нужна сумма числом, например 130');
       await db.setState(u.id, 'tc_paykind', { ...u.state_data, amount });
       const kb = new InlineKeyboard()
         .text('Разовая', 'tc:pk:single').text('Абонемент', 'tc:pk:package')
@@ -749,7 +775,7 @@ export function registerTeacher(bot) {
   bot.callbackQuery('tc:otherprice', async (ctx) => {
     if (!isOwner(ctx)) return ctx.answerCallbackQuery();
     await ctx.answerCallbackQuery();
-    await ctx.reply('Напиши сумму в гривнах, например 700');
+    await ctx.reply('Напиши сумму числом, например 12');
   });
 
   // Ответ на «Просить оплату?» → сохраняем урок
@@ -767,10 +793,10 @@ export function registerTeacher(bot) {
     const { student_id, time, date } = u.state_data ?? {};
     const lessonDate = date || today();
     const { data: stud } = await db.supabase
-      .from('tc_students').select('name, default_price_uah').eq('id', student_id).single();
+      .from('tc_students').select('name, default_price_uah, currency').eq('id', student_id).single();
     await db.supabase.from('tc_lessons').insert({
       student_id, student_name: stud.name,
-      lesson_date: lessonDate, lesson_time: time, price_uah: price,
+      lesson_date: lessonDate, lesson_time: time, price_uah: price, currency: curOf(stud),
       status: 'planned', ask_payment: askPayment,
     });
     // запоминаем цену как обычную, если её ещё не было
@@ -791,7 +817,7 @@ export function registerTeacher(bot) {
     kb.text('← В кабинет', 'tc:home');
     const payNote = askPayment ? ' · 💳 попрошу оплату' : '';
     await ctx.reply(
-      `Записала урок: ${stud.name} · ${fmtDate(lessonDate)}${time ? ' в ' + time : ''} · ${price} грн${payNote} ✅`,
+      `Записала урок: ${stud.name} · ${fmtDate(lessonDate)}${time ? ' в ' + time : ''} · ${money(price, stud.currency)}${payNote} ✅`,
       { reply_markup: kb });
   }
 
@@ -809,15 +835,15 @@ export function registerTeacher(bot) {
       return ctx.reply('Сколько уроков в абонементе? Напиши число, например 10');
     }
     const { data: stud } = await db.supabase
-      .from('tc_students').select('name').eq('id', student_id).single();
+      .from('tc_students').select('name, currency').eq('id', student_id).single();
     await db.supabase.from('tc_payments').insert({
       student_id, student_name: stud.name,
-      amount_uah: amount, pay_date: today(), kind,
+      amount_uah: amount, currency: curOf(stud), pay_date: today(), kind,
     });
     await db.clearState(u.id);
     await ctx.answerCallbackQuery({ text: 'Записано' });
     await ctx.reply(
-      `Оплата записана: ${stud.name} · ${uah(amount)} ✅`,
+      `Оплата записана: ${stud.name} · ${money(amount, stud.currency)} ✅`,
       { reply_markup: new InlineKeyboard().text('← В кабинет', 'tc:home') },
     );
   });
@@ -943,10 +969,11 @@ export function registerTeacher(bot) {
         const price = a.price != null && Number(a.price) >= 0
           ? Number(a.price) : (Number(stud?.default_price_uah) || 0);
         const who = stud ? stud.name : `${name} (новый ученик)`;
+        const cur = stud ? curOf(stud) : (normCur(a.currency) || 'EUR');
         return {
           ok: true,
-          a: { type: 'add_lesson', student: stud?.name ?? name, date: a.date, time, status, price },
-          line: `➕ Урок: ${who} · ${aiWhen(a.date, time)} · ${STATUS[status]} · ${uah(price)}`,
+          a: { type: 'add_lesson', student: stud?.name ?? name, date: a.date, time, status, price, currency: cur },
+          line: `➕ Урок: ${who} · ${aiWhen(a.date, time)} · ${STATUS[status]} · ${money(price, cur)}`,
         };
       }
 
@@ -981,11 +1008,13 @@ export function registerTeacher(bot) {
         const stud = await findStudent(name);
         let amount = a.amount != null ? Number(a.amount) : 0;
         let usual = false;
+        // валюта: как назвали в сообщении, иначе — валюта ученика (новым — евро)
+        let cur = normCur(a.currency) || (stud ? curOf(stud) : 'EUR');
         if (!(amount > 0) && kind === 'single' && stud?.default_price_uah > 0) {
-          amount = Number(stud.default_price_uah); usual = true;
+          amount = Number(stud.default_price_uah); usual = true; cur = curOf(stud);
         }
         if (!(amount > 0)) {
-          return warn(`${name}: не названа сумма оплаты. Напиши, например: «${name} оплатила 700».`);
+          return warn(`${name}: не названа сумма оплаты. Напиши, например: «${name} оплатила 130 €».`);
         }
         const lessons = kind === 'package'
           ? (Number(a.lessons) > 0 ? Math.round(Number(a.lessons)) : PACK_DEFAULT) : null;
@@ -994,8 +1023,9 @@ export function registerTeacher(bot) {
           ? ` · ${lessons} уроков${Number(a.lessons) > 0 ? '' : ' (по умолчанию)'}` : '';
         return {
           ok: true,
-          a: { type: 'add_payment', student: stud?.name ?? name, amount, kind, lessons },
-          line: `💰 Оплата: ${who} · ${uah(amount)}${usual ? ' (обычная цена)' : ''} · ${AI_KIND[kind]}${tail}`,
+          a: { type: 'add_payment', student: stud?.name ?? name, amount, kind, lessons, currency: cur },
+          line: `💰 Оплата: ${who} · ${money(amount, cur)}${usual ? ' (обычная цена)' : ''} · ${AI_KIND[kind]}${tail}` +
+            (stud && curOf(stud) !== cur ? ` · ⚠️ у ученика основная валюта ${SYM[curOf(stud)]}` : ''),
         };
       }
 
@@ -1030,7 +1060,7 @@ export function registerTeacher(bot) {
         return {
           ok: true,
           a: { type: 'delete_last_payment', student: stud.name, paymentId: p.id },
-          line: `🗑 Удалить оплату: ${stud.name} · ${uah(p.amount_uah)} · ${fmtDate(p.pay_date)} · ${AI_KIND[p.kind] ?? p.kind}${note}`,
+          line: `🗑 Удалить оплату: ${stud.name} · ${money(p.amount_uah, p.currency)} · ${fmtDate(p.pay_date)} · ${AI_KIND[p.kind] ?? p.kind}${note}`,
         };
       }
 
@@ -1042,6 +1072,18 @@ export function registerTeacher(bot) {
           ok: true,
           a: { type: 'reset_package', student: stud?.name ?? name, lessons: n },
           line: `🔄 Абонемент ${stud ? stud.name : `${name} (новый ученик)`}: было ${stud?.package_left || 0} → станет ${n} уроков`,
+        };
+      }
+
+      case 'set_currency': {
+        if (!name) return needName();
+        const cur = normCur(a.currency);
+        if (!cur) return warn(`${name}: не поняла валюту (UAH, EUR или USD).`);
+        const stud = await findStudent(name);
+        return {
+          ok: true,
+          a: { type: 'set_currency', student: stud?.name ?? name, currency: cur },
+          line: `💱 Валюта ученика ${stud ? stud.name : `${name} (новый ученик)`}: ${SYM[cur]} (старые записи не меняются)`,
         };
       }
 
@@ -1064,10 +1106,10 @@ export function registerTeacher(bot) {
       }
 
       case 'add_lesson': {
-        const stud = await ensureStudent(a.student);
+        const stud = await ensureStudent(a.student, a.currency);
         await db.supabase.from('tc_lessons').insert({
           student_id: stud.id, student_name: stud.name,
-          lesson_date: a.date, lesson_time: a.time, price_uah: a.price,
+          lesson_date: a.date, lesson_time: a.time, price_uah: a.price, currency: curOf(stud),
           status: a.status, ask_payment: false,
         });
         if (!stud.default_price_uah && a.price > 0) {
@@ -1089,10 +1131,10 @@ export function registerTeacher(bot) {
       }
 
       case 'add_payment': {
-        const stud = await ensureStudent(a.student);
+        const stud = await ensureStudent(a.student, a.currency);
         const row = {
           student_id: stud.id, student_name: stud.name,
-          amount_uah: a.amount, pay_date: today(), kind: a.kind,
+          amount_uah: a.amount, currency: a.currency || curOf(stud), pay_date: today(), kind: a.kind,
         };
         if (a.kind === 'package') row.note = `абонемент ${a.lessons} уроков`;
         await db.supabase.from('tc_payments').insert(row);
@@ -1100,9 +1142,9 @@ export function registerTeacher(bot) {
           const balance = (stud.package_left || 0) + a.lessons;
           await db.supabase.from('tc_students')
             .update({ package_left: balance, package_total: a.lessons }).eq('id', stud.id);
-          return `💰 Записала оплату: ${stud.name} · ${uah(a.amount)} · абонемент ${a.lessons} уроков. На балансе: ${balance}.`;
+          return `💰 Записала оплату: ${stud.name} · ${money(a.amount, row.currency)} · абонемент ${a.lessons} уроков. На балансе: ${balance}.`;
         }
-        return `💰 Записала оплату: ${stud.name} · ${uah(a.amount)} · ${AI_KIND[a.kind]}`;
+        return `💰 Записала оплату: ${stud.name} · ${money(a.amount, row.currency)} · ${AI_KIND[a.kind]}`;
       }
 
       case 'delete_lesson':
@@ -1118,6 +1160,13 @@ export function registerTeacher(bot) {
         await db.supabase.from('tc_students')
           .update({ package_left: a.lessons }).eq('id', stud.id);
         return `🔄 Абонемент ${stud.name}: теперь ${a.lessons} уроков`;
+      }
+
+      case 'set_currency': {
+        const stud = await ensureStudent(a.student, a.currency);
+        await db.supabase.from('tc_students')
+          .update({ currency: a.currency }).eq('id', stud.id);
+        return `💱 Валюта ${stud.name}: теперь ${SYM[a.currency]}`;
       }
 
       default:
@@ -1192,7 +1241,7 @@ export function registerTeacher(bot) {
     await ctx.editMessageReplyMarkup().catch(() => {});
     // Порядок записи: сначала обнуление и оплаты, потом уроки — чтобы урок
     // списался из только что купленного абонемента. Внутри групп порядок сохраняется.
-    const rank = (a) => (a.type === 'reset_package' ? 0 : a.type === 'add_payment' ? 1 : 2);
+    const rank = (a) => (a.type === 'reset_package' || a.type === 'set_currency' ? 0 : a.type === 'add_payment' ? 1 : 2);
     const ordered = [...actions].sort((x, y) => rank(x) - rank(y));
     const out = [];
     for (const a of ordered) {
