@@ -40,20 +40,48 @@ export async function ensureUser(from, startPayload = null) {
 
     if (Object.keys(patch).length) {
       const { data } = await supabase
-        .from(TABLES.users).update(patch).eq('id', existing.id).select().single();
-      return data;
-    }
-    return existing;
-  }
-
+        .from(TABLES.users).update(patch).eq('id',
+// ---------------------------------------------------------------------
+// PRODUCTS
+// ---------------------------------------------------------------------
+export async function listProducts(section) {
   const { data, error } = await supabase
-    .from(TABLES.users)
+    .from(TABLES.products)
+    .select('*')
+    .eq('section', section)
+    .eq('is_active', true)
+    .order('sort_order', { ascending: true });
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function countActive(section) {
+  const { count } = await supabase
+    .from(TABLES.products)
+    .select('id', { count: 'exact', head: true })
+    .eq('section', section)
+    .eq('is_active', true);
+  return count ?? 0;
+}
+
+export async function getProduct(id) {
+  const { data } = await supabase
+    .from(TABLES.products).select('*').eq('id', id).maybeSingle();
+  return data;
+}
+
+// ---------------------------------------------------------------------
+// ORDERS
+// ---------------------------------------------------------------------
+export async function createOrder(user, product) {
+  const { data, error } = await supabase
+    .from(TABLES.orders)
     .insert({
-      tg_id:      from.id,
-      username:   from.username ?? null,
-      first_name: from.first_name ?? null,
-      source:     startPayload,
-      last_seen:  new Date().toISOString(),
+      user_id:        user.id,
+      product_type:   product.type,
+      product_ref:    product.id,
+      title_snapshot: product.title,
+      amount_eur:     product.price_eur,
     })
     .select()
     .single();
@@ -61,26 +89,44 @@ export async function ensureUser(from, startPayload = null) {
   return data;
 }
 
-export async function setState(userId, state, stateData = {}) {
-  await supabase
-    .from(TABLES.users)
-    .update({ state, state_data: stateData })
-    .eq('id', userId);
-}
-
-export async function clearState(userId) {
-  await setState(userId, null, {});
-}
-
-export async function getUserByTgId(tgId) {
+export async function getOrder(id) {
   const { data } = await supabase
-    .from(TABLES.users).select('*').eq('tg_id', tgId).maybeSingle();
+    .from(TABLES.orders).select('*').eq('id', id).maybeSingle();
   return data;
 }
 
-export async function markBlocked(userId) {
-  await supabase.from(TABLES.users).update({ is_blocked: true }).eq('id', userId);
+export async function updateOrder(id, patch) {
+  const { data, error } = await supabase
+    .from(TABLES.orders).update(patch).eq('id', id).select().single();
+  if (error) throw error;
+  return data;
 }
 
-// Отметка «был в боте» — для аналитики. Ошибки не должны ломать бота.
-export async function
+// Атомарное подтверждение — защита от двойного нажатия «Подтвердить».
+// Вернёт null, если заказ уже был обработан.
+export async function confirmOrder(orderId, adminTgId) {
+  const { data, error } = await supabase
+    .rpc('confirm_order', { p_order_id: orderId, p_admin_tg_id: adminTgId });
+  if (error) throw error;
+  return data?.[0] ?? null;
+}
+
+export async function userOrders(userId) {
+  const { data } = await supabase
+    .from(TABLES.orders)
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .limit(20);
+  return data ?? [];
+}
+
+export async function paidDigitalOrders(userId) {
+  const { data } = await supabase
+    .from(TABLES.orders)
+    .select('*')
+    .eq('user_id', userId)
+    .eq('product_type', 'digital')
+    .eq('status', 'paid');
+  return data ?? [];
+}
