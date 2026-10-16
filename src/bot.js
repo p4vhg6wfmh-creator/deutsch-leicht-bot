@@ -17,6 +17,15 @@ export function getBot() {
 
   const bot = new Bot(ENV.BOT_TOKEN);
 
+  // Аналитика: на любое сообщение или нажатие кнопки отмечаем «был в боте».
+  // Стоит первым, чтобы сработать до всех остальных обработчиков.
+  bot.use(async (ctx, next) => {
+    if (ctx.from && !ctx.from.is_bot) {
+      await db.touchLastSeen(ctx.from.id);
+    }
+    await next();
+  });
+
   // Порядок важен: меню регистрирует команды, payment — обработчики сообщений
   registerMenu(bot);
   registerGroups(bot);
